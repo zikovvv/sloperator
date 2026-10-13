@@ -27,12 +27,16 @@ describe('codexArgs', () => {
     expect(fallback).not.toMatch(/AGENTS/)
   })
 
-  it('offers Codex only the rename tool from the orchestrator\'s server, before any subcommand', () => {
+  it('offers Codex the orchestrator\'s own tools but not the permission host, before any subcommand', () => {
     const args = codexArgs(session(), 'hi', 'thread-1', 'http://127.0.0.1:1/mcp/tok')
     const url = args.indexOf('mcp_servers.orchestrator.url="http://127.0.0.1:1/mcp/tok"')
     expect(args[url - 1]).toBe('-c')
-    expect(args[args.indexOf('mcp_servers.orchestrator.enabled_tools=["rename_session"]') - 1]).toBe('-c')
+    const enabled = args.find((arg) => arg.startsWith('mcp_servers.orchestrator.enabled_tools='))!
+    expect(args[args.indexOf(enabled) - 1]).toBe('-c')
+    expect(JSON.parse(enabled.split('=')[1])).toEqual(['rename_session', 'list_workspace', 'update_session', 'update_worktree',
+      'create_session', 'create_worktree', 'manage_folder', 'manage_stack'])
     expect(args[args.indexOf('mcp_servers.orchestrator.default_tools_approval_mode="approve"') - 1]).toBe('-c')   // nobody to ask in exec
+    expect(args).toContain('mcp_servers.orchestrator.tool_timeout_sec=960')   // a change the person is asked about waits for them
     expect(url).toBeLessThan(args.indexOf('resume'))
     expect(codexArgs(session(), 'hi', null).some((arg) => arg.startsWith('mcp_servers'))).toBe(false)
   })

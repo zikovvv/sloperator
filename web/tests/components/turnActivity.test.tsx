@@ -5,9 +5,20 @@ import { TurnActivity } from '../../src/components/TurnActivity.tsx'
 
 afterEach(() => cleanup())
 const now = 100_000
-const base = { agents: [], running: true, startedAt: 1, now, onKill: vi.fn() }
+const base = { agents: [], background: [], running: true, startedAt: 1, now, onKill: vi.fn() }
 
 describe('TurnActivity', () => {
+  it('lists what is still running behind the turn: a command or a subagent, what it is, and for how long', () => {
+    render(<TurnActivity {...base} tools={[]} finished={[]} processes={[]} background={[
+      { id: 'b1', kind: 'command', description: 'run the whole suite', startedAt: now - 125_000 },
+      { id: 'a1', kind: 'agent', description: 'review the change', startedAt: now - 5_000 },
+    ]} />)
+    const section = screen.getByTestId('background-tasks')
+    expect(section.textContent).toContain('In the background (2) · the turn stays open until these end')
+    const rows = [...section.querySelectorAll('div.flex')].map((row) => row.textContent)
+    expect(rows).toEqual(['commandrun the whole suite2m 5s', 'subagentreview the change5s'])
+  })
+
   it('opens a running tool call to its whole input, a finished one to what it printed', () => {
     render(<TurnActivity {...base} finished={[
       { id: 'f1', name: 'Bash', detail: 'npm test', input: { command: 'npm test' }, startedAt: 1000, endedAt: 66_000, output: '', failed: true },

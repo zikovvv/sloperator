@@ -1,5 +1,6 @@
 #!/bin/bash
 # Fake codex: exec --json shape. The prompt is the last argument.
+if [ "$1" = "login" ]; then echo "FAKE-CODEX-LOGIN"; exit 0; fi
 prompt="${@: -1}"
 [ -n "$FAKE_ARGS_LOG" ] && printf '%s\n' "$*" >> "$FAKE_ARGS_LOG"
 echo '{"type":"thread.started","thread_id":"thread-fake"}'
@@ -18,6 +19,25 @@ PYX
   esc=$(printf '%s' "$said" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
   echo '{"type":"item.started","item":{"id":"r1","type":"mcp_tool_call","server":"orchestrator","tool":"rename_session"}}'
   echo '{"type":"item.completed","item":{"id":"r1","type":"mcp_tool_call","server":"orchestrator","tool":"rename_session","status":"completed"}}'
+  echo '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":'"$esc"'}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":3}}'
+  exit 0
+fi
+# SIDEBAR <tool> <json>: the same moves the sidebar makes, through the orchestrator's server.
+if [ -n "$url" ] && [[ "$prompt" == *"SIDEBAR "* ]]; then
+  line=$(printf '%s\n' "$prompt" | grep 'SIDEBAR ' | tail -1 | sed 's/.*SIDEBAR //')
+  tool=${line%% *}; targs=${line#"$tool"}; [ -z "${targs// /}" ] && targs='{}'
+  said=$(HOST="$url" TOOL="$tool" ARGS="$targs" python3 - <<'PYX'
+import json, os, urllib.request
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": os.environ['TOOL'], "arguments": json.loads(os.environ['ARGS'])}}).encode()
+request = urllib.request.Request(os.environ['HOST'], data=body, headers={"content-type": "application/json", "accept": "application/json, text/event-stream"})
+result = json.load(urllib.request.urlopen(request, timeout=120))["result"]
+print(("FAILED: " if result.get("isError") else "DID: ") + result["content"][0]["text"])
+PYX
+)
+  esc=$(printf '%s' "$said" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+  echo '{"type":"item.started","item":{"id":"r2","type":"mcp_tool_call","server":"orchestrator","tool":"'"$tool"'"}}'
+  echo '{"type":"item.completed","item":{"id":"r2","type":"mcp_tool_call","server":"orchestrator","tool":"'"$tool"'","status":"completed"}}'
   echo '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":'"$esc"'}}'
   echo '{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":3}}'
   exit 0

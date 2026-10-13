@@ -117,7 +117,27 @@ describe('sessions from older files', () => {
     writeFileSync(join(dir, 'state.json'), JSON.stringify({ sessions: [
       { id: 'a', worktreeID: 'w', title: 't', engine: 'claude' }, { id: 'b', worktreeID: 'w', title: 't', engine: 'codex' }, { id: 'c', worktreeID: 'w', title: 't', engine: 'claude', model: 'claude-haiku-4-5-20251001' },
     ] }))
-    expect(loadState().sessions.map((session) => session.model)).toEqual(['claude-fable-5', 'gpt-5.5', 'claude-haiku-4-5-20251001'])
+    expect(loadState().sessions.map((session) => session.model)).toEqual(['claude-fable-5-1', 'gpt-5.5', 'claude-haiku-4-5-20251001'])
+  })
+})
+
+describe('stacks in the state file', () => {
+  it('keeps well-formed stacks, fills what an entry lacks, and drops what is not a stack', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orch-stacks-'))
+    process.env.ORCHESTRATOR_STATE_DIR = dir
+    vi.resetModules()
+    const { loadState } = await import('../server/state.ts')
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ stacks: [
+      { id: 'k', projectID: 'p', name: 'Payments', base: 'develop', layers: ['a', 7, 'b'] },
+      { projectID: 'p', layers: [] },
+      { id: 'x', layers: 'nope' }, null,
+    ] }))
+    const [kept, filled, ...rest] = loadState().stacks
+    expect(kept).toEqual({ id: 'k', projectID: 'p', name: 'Payments', base: 'develop', layers: ['a', 'b'] })
+    expect(filled).toMatchObject({ id: expect.any(String), name: 'Stack', base: 'main', layers: [] })
+    expect(rest).toEqual([])
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({}))
+    expect(loadState().stacks).toEqual([])
   })
 })
 
@@ -130,7 +150,7 @@ describe('session defaults from older files', () => {
     writeFileSync(join(dir, 'state.json'), JSON.stringify({ settings: { sessionDefaults: { engine: 'claude', model: 'claude-sonnet-5' } } }))
     expect(loadState().settings.sessionDefaults.models).toEqual({ claude: { model: 'claude-sonnet-5', effort: null }, codex: { model: 'gpt-5.5', effort: null } })
     writeFileSync(join(dir, 'state.json'), JSON.stringify({ settings: { sessionDefaults: { models: { codex: { model: '', effort: undefined }, claude: { model: '' } } } } }))
-    expect(loadState().settings.sessionDefaults.models).toEqual({ claude: { model: 'claude-fable-5', effort: null }, codex: { model: 'gpt-5.5', effort: null } })
+    expect(loadState().settings.sessionDefaults.models).toEqual({ claude: { model: 'claude-fable-5-1', effort: null }, codex: { model: 'gpt-5.5', effort: null } })
   })
 })
 
@@ -142,8 +162,8 @@ describe('session defaults', () => {
     const { loadState, DEFAULT_SESSION_SETTINGS } = await import('../server/state.ts')
     const first = loadState()
     first.settings.sessionDefaults.models.claude = { model: 'claude-haiku-4-5-20251001', effort: 'low' }
-    expect(DEFAULT_SESSION_SETTINGS.models.claude.model).toBe('claude-fable-5')
-    expect(loadState().settings.sessionDefaults.models.claude.model).toBe('claude-fable-5')
+    expect(DEFAULT_SESSION_SETTINGS.models.claude.model).toBe('claude-fable-5-1')
+    expect(loadState().settings.sessionDefaults.models.claude.model).toBe('claude-fable-5-1')
   })
 })
 

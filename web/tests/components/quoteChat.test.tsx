@@ -17,7 +17,7 @@ const select = (node: Node | null, text: string) => ({ isCollapsed: false, ancho
 beforeEach(() => {
   vi.resetModules(); Element.prototype.scrollIntoView = vi.fn()
   vi.stubGlobal('getSelection', vi.fn(() => noSelection))
-  vi.doMock('../../src/lib/api.ts', () => ({ api: { activity: async () => ({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] }), draft: async () => ({ text: '' }), saveDraft: async () => ({}), voiceStatus: async () => ({ available: false }) } }))
+  vi.doMock('../../src/lib/api.ts', () => ({ api: { activity: async () => ({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] }), draft: async () => ({ text: '' }), saveDraft: async () => ({}), voiceStatus: async () => ({ available: false }) } }))
   vi.doMock('../../src/lib/useVoice.ts', () => ({ useVoice: () => ({ state: 'idle', hint: null, toggle: vi.fn(), stop: vi.fn() }) }))
   vi.doMock('../../src/lib/highlight.ts', () => ({ highlight: async () => null, languageOf: () => null }))
 })

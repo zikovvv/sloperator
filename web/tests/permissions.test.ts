@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { askUserAnswer, handleMCP, PermissionBroker, PROMPT_TOOL, PROMPT_TOOL_NAME, RENAME_TOOL, RENAME_TOOL_NAME } from '../server/permissions.ts'
+import { approveTool, askUserAnswer, handleMCP, PermissionBroker, PROMPT_TOOL, PROMPT_TOOL_NAME, RENAME_TOOL, renameTool, type MCPTool } from '../server/permissions.ts'
 
 const request = (id = 'r1') => ({ id, toolName: 'Bash', input: { command: 'ls' }, toolUseID: 't1', status: 'pending' as const })
 
@@ -50,7 +50,12 @@ describe('askUserAnswer', () => {
 
 describe('handleMCP — the wire the CLI speaks', () => {
   const call = (message: unknown, decision = { behavior: 'allow' as const, updatedInput: { ok: true } }) =>
-    handleMCP(message, async () => decision, '9.9.9', async (title) => `renamed:${title}`)
+    handleMCP(message, [approveTool(async () => decision), renameTool(async (title) => `renamed:${title}`), moody], '9.9.9')
+  /** A tool of the app's own: what it rejects with is the tool's failure, told to the agent in words. */
+  const moody: MCPTool = {
+    name: 'moody', description: 'Fails when told to.', inputSchema: { type: 'object', properties: {} },
+    call: async (args) => { if ((args as any)?.fail) throw new Error('No worktree matches "x".'); return 'fine' },
+  }
 
   it('initialises with the client\'s protocol version and a session id', async () => {
     const out = await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } })
@@ -65,9 +70,9 @@ describe('handleMCP — the wire the CLI speaks', () => {
     expect(await call({ jsonrpc: '2.0', method: 'notifications/initialized' })).toEqual({ status: 202 })
     expect((await call({ jsonrpc: '2.0', id: 3, method: 'ping' })).body).toEqual({ jsonrpc: '2.0', id: 3, result: {} })
     const list = await call({ jsonrpc: '2.0', id: 4, method: 'tools/list' })
-    expect((list.body as any).result.tools.map((tool: any) => tool.name)).toEqual([PROMPT_TOOL, RENAME_TOOL])
+    expect((list.body as any).result.tools.map((tool: any) => tool.name)).toEqual([PROMPT_TOOL, RENAME_TOOL, 'moody'])
+    expect((list.body as any).result.tools[2]).toEqual({ name: 'moody', description: 'Fails when told to.', inputSchema: { type: 'object', properties: {} } })
     expect(PROMPT_TOOL_NAME).toBe('mcp__orchestrator__approve')
-    expect(RENAME_TOOL_NAME).toBe('mcp__orchestrator__rename_session')
   })
 
   it('renames the session with the title given, or has one chosen when none is', async () => {
@@ -82,7 +87,7 @@ describe('handleMCP — the wire the CLI speaks', () => {
     const seen: unknown[] = []
     const out = await handleMCP({ jsonrpc: '2.0', id: 5, method: 'tools/call',
       params: { name: PROMPT_TOOL, arguments: { tool_name: 'Bash', input: { command: 'ls' }, tool_use_id: 't1' } } },
-      async (args) => { seen.push(args); return { behavior: 'deny', message: 'no' } }, '1', async () => '')
+      [approveTool(async (args) => { seen.push(args); return { behavior: 'deny', message: 'no' } })], '1')
     expect(seen).toEqual([{ tool_name: 'Bash', input: { command: 'ls' }, tool_use_id: 't1' }])
     expect((out.body as any).result).toEqual({ content: [{ type: 'text', text: JSON.stringify({ behavior: 'deny', message: 'no' }) }] })
     // Anything short of the three fields the CLI sends is an invalid call, not a request to show.
@@ -98,6 +103,13 @@ describe('handleMCP — the wire the CLI speaks', () => {
     expect((await call({ jsonrpc: '2.0', method: 'tools/call', params: { name: PROMPT_TOOL } })).status).toBe(202)
     expect((await call({ jsonrpc: '2.0', id: 8, method: 'server/discover' })).body).toMatchObject({ error: { code: -32601 } })
     expect((await call({ jsonrpc: '2.0', method: 'something/odd' })).status).toBe(202)
+  })
+
+  it('tells the agent in words when a tool of the app\'s own fails, as a failed call rather than a protocol error', async () => {
+    const run = async (args: unknown) =>
+      ((await call({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'moody', arguments: args } })).body as any).result
+    expect(await run({})).toEqual({ content: [{ type: 'text', text: 'fine' }] })
+    expect(await run({ fail: true })).toEqual({ content: [{ type: 'text', text: 'No worktree matches "x".' }], isError: true })
   })
 
   it('rejects what is not JSON-RPC at all', async () => {

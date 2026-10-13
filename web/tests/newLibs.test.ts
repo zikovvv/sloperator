@@ -97,7 +97,7 @@ describe('language server providers', () => {
     api.references.mockResolvedValueOnce({ locations: [{ path: '/w/a.py', line: 10, character: 0 }, { path: '/w/a.py', line: 99, character: 0 }], error: null })
     navigate.mockClear()
     expect(await providers.references.provideReferences(model, at)).toHaveLength(1)
-    expect(notice).toHaveBeenLastCalledWith('2 usages, 1 outside this view — opening the first')
+    expect(notice).toHaveBeenLastCalledWith('2 usages, 1 outside this view')
     expect(navigate).not.toHaveBeenCalled()   // something here to show, so no jump
 
     api.hover.mockResolvedValueOnce({ text: 'int', error: null })

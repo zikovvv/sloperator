@@ -24,9 +24,10 @@ export function ActivityPanel({ sessionID, running }: { sessionID: string; runni
     return () => { live = false; if (timer) clearInterval(timer) }
   }, [sessionID, running])
 
-  if (!activity || (!activity.tools.length && !activity.finished.length && !activity.processes.length && !activity.agents.length)) return null
+  if (!activity || (!activity.tools.length && !activity.background.length && !activity.finished.length && !activity.processes.length && !activity.agents.length)) return null
   const parts = [
     activity.tools.length ? count(activity.tools.length, 'tool call') : '',
+    activity.background.length ? `${activity.background.length} in the background` : '',
     activity.finished.length ? `${activity.finished.length} finished` : '',
     activity.processes.length ? count(activity.processes.length, 'process', 'processes') : '',
     activity.agents.length ? count(activity.agents.length, 'subagent') : '',
@@ -44,7 +45,7 @@ export function ActivityPanel({ sessionID, running }: { sessionID: string; runni
         </button>
         {open && (
           <div className="max-h-[40vh] overflow-y-auto pb-2">
-            <TurnActivity tools={activity.tools} finished={activity.finished} processes={activity.processes} agents={activity.agents}
+            <TurnActivity tools={activity.tools} background={activity.background} finished={activity.finished} processes={activity.processes} agents={activity.agents}
                           running={activity.running} startedAt={activity.startedAt} now={now} onKill={kill} />
           </div>)}
       </div>

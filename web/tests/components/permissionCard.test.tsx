@@ -104,6 +104,18 @@ describe('permission for a tool', () => {
     await waitFor(() => expect(answer).toHaveBeenCalledWith('r9', { behavior: 'deny', message: '' }))
   })
 
+  it('names Codex when it is Codex asking: the tools of the app itself ask for both engines', async () => {
+    const { PermissionCard } = await import('../../src/components/PermissionCard.tsx')
+    const pending: PermissionRequest = { id: 'r12', toolName: 'mcp__orchestrator__update_worktree', input: { folder: 'review' }, toolUseID: 't', status: 'pending' }
+    const view = render(<PermissionCard item={{ ...item(pending), engine: 'codex' }} />)
+    expect(screen.getByText('Codex wants to run')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Deny…' }))
+    expect(screen.getByPlaceholderText('Tell Codex why, or what to do instead')).toBeTruthy()
+    view.unmount()
+    render(<PermissionCard item={{ ...item({ ...pending, status: 'allowed' }), engine: 'codex' }} />)
+    expect(screen.getByText('Codex asked to run')).toBeTruthy()
+  })
+
   it('reads as history once settled, and copes with the API failing', async () => {
     await mount({ id: 'r10', toolName: 'Write', input: { file_path: '/w/a.py', content: 'x = 1' }, toolUseID: 't', status: 'allowed' })
     expect(screen.getByText('Claude asked to run')).toBeTruthy()

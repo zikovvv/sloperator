@@ -86,11 +86,15 @@ export interface ActiveTool { id: string; name: string; detail: string; startedA
 export interface FinishedTool extends ActiveTool { endedAt: number; output: string; failed: boolean }
 /** A process under the agent: elapsed seconds and CPU share as ps reports them. */
 export interface ActiveProcess { pid: number; ppid: number; command: string; depth: number; elapsed: number; cpu: number }
+/** Something the agent started and left running behind its turn: a command, or a subagent. */
+export interface BackgroundTask { id: string; kind: 'command' | 'agent'; description: string; startedAt: number }
 /** What a session is doing right now, and what its subagents have done. */
 export interface SessionActivity {
   running: boolean
   startedAt: number | null
   tools: ActiveTool[]
+  /** Still going behind the turn. Only a running turn has any: they end with it. */
+  background: BackgroundTask[]
   /** This turn's finished tool calls while it runs; the last turn's once it has ended. */
   finished: FinishedTool[]
   processes: ActiveProcess[]
@@ -127,7 +131,7 @@ export interface Notice {
 }
 
 export type ServerEvent =
-  | { type: 'state'; projects: Project[]; worktrees: Worktree[]; sessions: Session[] }
+  | { type: 'state'; projects: Project[]; worktrees: Worktree[]; sessions: Session[]; stacks: StackView[] }
   | { type: 'transcript'; sessionID: string; items: TranscriptItem[] }
   | { type: 'append'; sessionID: string; item: TranscriptItem }
   | { type: 'patch'; sessionID: string; itemID: string; toolOutput: string }
@@ -180,6 +184,38 @@ export interface PRActivity {
 export interface GitHubUser { login: string; avatarUrl: string }
 
 export type PRState = 'open' | 'draft' | 'merged' | 'closed'
+
+/** One folder's sub-folders, for browsing to a project. */
+export interface FolderListing {
+  path: string
+  parent: string | null
+  isGit: boolean
+  folders: Array<{ name: string; path: string; isGit: boolean }>
+  /** How many more folders there are than the ones listed. */
+  more: number
+}
+
+/** Worktrees whose branches build on each other, bottom first: each layer's base is the one below it. */
+export interface Stack {
+  id: string
+  projectID: string
+  name: string
+  /** What the bottom layer builds on: the project's default branch when the stack was made. */
+  base: string
+  /** Worktree ids, bottom first. */
+  layers: string[]
+}
+/** A layer's open pull request, as far as the PR list already fetched knows. */
+export interface LayerPR { number: number; url: string; state: PRState }
+export interface StackView extends Stack { prs: Array<LayerPR | null> }
+/** What one step of a stack operation did to one layer. */
+export interface LayerResult {
+  worktreeID: string
+  branch: string
+  status: 'merged' | 'up-to-date' | 'conflict' | 'failed' | 'created' | 'exists' | 'landed'
+  message: string
+  url?: string
+}
 export type CheckResult = 'pass' | 'fail' | 'pending' | 'skipped'
 export interface CheckRun { name: string; result: CheckResult; url: string | null }
 

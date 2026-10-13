@@ -2,7 +2,7 @@ import { DEFAULT_CLAUDE_PRICING, type ClaudePricing } from './usage.ts'
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { Project, Session, TranscriptItem, Worktree } from '../shared/types.ts'
+import type { Project, Session, Stack, TranscriptItem, Worktree } from '../shared/types.ts'
 
 /** The same directory the native app used, so existing projects and sessions carry over. */
 function defaultRoot(): string {
@@ -17,8 +17,7 @@ const ROOT = process.env.ORCHESTRATOR_STATE_DIR ?? defaultRoot()
 const STATE = join(ROOT, 'state.json')
 const TRANSCRIPTS = join(ROOT, 'transcripts')
 
-import { STRONGEST_MODEL } from '../shared/models.ts'
-export { STRONGEST_MODEL }
+import { modelCatalog } from './models.ts'
 
 /**
  * What a new session starts with. The engine is always Claude; the model and effort are the
@@ -33,7 +32,7 @@ export interface SessionDefaults {
 export const DEFAULT_SESSION_SETTINGS: SessionDefaults = {
   // A message sent mid-run is delivered when the turn ends; interrupting is the opt-in.
   accessMode: 'edits', steeringMode: 'queue',
-  models: { claude: { model: STRONGEST_MODEL.claude, effort: null }, codex: { model: STRONGEST_MODEL.codex, effort: null } },
+  models: { claude: { model: modelCatalog().claude.strongest, effort: null }, codex: { model: modelCatalog().codex.strongest, effort: null } },
 }
 
 export interface AppSettings {
@@ -50,6 +49,7 @@ export interface AppState {
   projects: Project[]
   worktrees: Worktree[]
   sessions: Session[]
+  stacks: Stack[]
   queuedMessages: Record<string, string[]>
   drafts: Record<string, string>
   /// How many transcript items each engine has already been shown, per session. Drives the
@@ -87,7 +87,7 @@ function normalizeSession(raw: any): Session {
     accessMode: raw.accessMode ?? 'edits',
     steeringMode: raw.steeringMode ?? DEFAULT_SESSION_SETTINGS.steeringMode,
     // A session that never chose a model now runs the strongest one, and the header says so.
-    model: raw.model ?? STRONGEST_MODEL[raw.engine === 'codex' ? 'codex' : 'claude'],
+    model: raw.model ?? modelCatalog()[raw.engine === 'codex' ? 'codex' : 'claude'].strongest,
     effort: raw.effort ?? null,
     claudeSessionID: raw.claudeSessionID ?? null,
     codexThreadID: raw.codexThreadID ?? null,
@@ -104,7 +104,7 @@ function normalizeSession(raw: any): Session {
 export function loadState(): AppState {
   mkdirSync(TRANSCRIPTS, { recursive: true })
   if (!existsSync(STATE)) {
-    return { projects: [], worktrees: [], sessions: [], queuedMessages: {}, drafts: {},
+    return { projects: [], worktrees: [], sessions: [], stacks: [], queuedMessages: {}, drafts: {},
              lastSeen: {}, seenComments: {}, lastTurn: {}, settings: { ...DEFAULT_SETTINGS, sessionDefaults: normalizeDefaults(undefined) } }
   }
   try {
@@ -137,6 +137,10 @@ export function loadState(): AppState {
         nameIsManual: !!worktree.nameIsManual,
       })),
       sessions: (raw.sessions ?? []).map((session: any) => normalizeSession(legacy ? { ...session, steeringMode: 'queue' } : session)),
+      stacks: (raw.stacks ?? []).filter((stack: any) => Array.isArray(stack?.layers)).map((stack: any) => ({
+        id: stack.id ?? crypto.randomUUID(), projectID: stack.projectID, name: stack.name ?? 'Stack',
+        base: stack.base ?? 'main', layers: stack.layers.filter((id: unknown) => typeof id === 'string'),
+      })),
       queuedMessages: raw.queuedMessages ?? {},
       drafts: raw.drafts ?? {},
       lastSeen: raw.lastSeen ?? {},
@@ -156,7 +160,7 @@ export function loadState(): AppState {
     const backup = `${STATE}.corrupt-${Date.now()}`
     renameSync(STATE, backup)
     console.error(`state.json could not be read; set aside at ${backup}`, error)
-    return { projects: [], worktrees: [], sessions: [], queuedMessages: {}, drafts: {},
+    return { projects: [], worktrees: [], sessions: [], stacks: [], queuedMessages: {}, drafts: {},
              lastSeen: {}, seenComments: {}, lastTurn: {}, settings: { ...DEFAULT_SETTINGS, sessionDefaults: normalizeDefaults(undefined) } }
   }
 }
@@ -173,8 +177,8 @@ function normalizeDefaults(raw: any): SessionDefaults {
     accessMode: stored.accessMode ?? DEFAULT_SESSION_SETTINGS.accessMode,
     steeringMode: (legacy ? null : stored.steeringMode) ?? DEFAULT_SESSION_SETTINGS.steeringMode,
     models: {
-      claude: { model: models.claude?.model || STRONGEST_MODEL.claude, effort: models.claude?.effort ?? null },
-      codex: { model: models.codex?.model || STRONGEST_MODEL.codex, effort: models.codex?.effort ?? null },
+      claude: { model: models.claude?.model || modelCatalog().claude.strongest, effort: models.claude?.effort ?? null },
+      codex: { model: models.codex?.model || modelCatalog().codex.strongest, effort: models.codex?.effort ?? null },
     },
   }
 }

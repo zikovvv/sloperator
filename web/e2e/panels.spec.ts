@@ -18,7 +18,6 @@ test('review panel: source and test files split, scope and context change, gutte
   await expect(page.getByText('test_app.py')).toBeVisible()
   await page.getByRole('combobox', { name: 'What to compare' }).selectOption('branch')
   await page.getByRole('combobox', { name: 'What to compare' }).selectOption('uncommitted')
-  await page.getByRole('combobox', { name: 'Context lines' }).selectOption('10')
   await page.getByTestId('tree-file').filter({ hasText: 'app.py' }).first().click()
   await expect(page.locator('.monaco-diff-editor .view-line').first()).toBeAttached({ timeout: 30_000 })
   // The gutter handler listens for mousedown on the margin; the line-number cell is the margin.
@@ -38,7 +37,6 @@ test('review panel: source and test files split, scope and context change, gutte
   // The panel remembers its scope, context and open sidebar across a reload.
   await page.reload()
   await expect(page.getByTestId('review-sidebar')).toBeVisible()
-  await expect(page.getByRole('combobox', { name: 'Context lines' })).toHaveValue('10')
 })
 
 test('terminal drawer: a shell opens in the worktree, a second tab, close one', async ({ page }) => {
@@ -64,7 +62,8 @@ test('tabs: Claude Infra lists and previews; Usage renders; Pull Requests and Gi
   await page.getByRole('tab', { name: 'Pull Requests' }).click()
   await expect(page.locator('main')).toContainText(/Asking GitHub|gh|remote|not installed|No open pull requests/)
   await page.getByRole('tab', { name: 'GitHub' }).click()
-  await expect(page.locator('main')).toContainText(/Asking GitHub|gh|remote|Nobody has commented|not installed/)
+  // Still asking, degraded, or already answered by the fake gh: any of them is the tab working.
+  await expect(page.locator('main')).toContainText(/Asking GitHub|gh|remote|Nobody has commented|not installed|comments/)
   await page.getByRole('tab', { name: 'Tasks' }).click()
   await expect(page.getByText('Running now')).toBeVisible()
   await page.getByRole('tab', { name: 'Sessions' }).click()
@@ -119,7 +118,8 @@ test('a failed turn shows the failure and a Continue button that runs it again',
   const box = page.getByPlaceholder(/Message the agent/)
   await box.fill('please FAIL loudly'); await box.press('Enter')
   await expect(page.locator('main')).toContainText(/401/)
-  await expect(page.getByText(/The engine could not be reached/)).toBeVisible()
+  // The fake's failure is a lapsed login: sign in again is offered beside Continue.
+  await expect(page.getByText(/The login was revoked or has expired/)).toBeVisible()
   await page.getByRole('button', { name: 'Continue' }).click()
   await expect(page.getByText(/Continuing after the failure/)).toBeVisible()
   // It failed again, so there are two of them now.

@@ -14,16 +14,41 @@ const error = (text: string, canRetry?: boolean): TranscriptItem =>
 beforeEach(() => { vi.resetModules(); Element.prototype.scrollIntoView = vi.fn() })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
-const mount = async (items: TranscriptItem[], running = false) => {
-  vi.doMock('../../src/lib/api.ts', () => ({ api: { activity: async () => ({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] }), draft: async () => ({ text: '' }), saveDraft: async () => ({}), voiceStatus: async () => ({ available: false }) } }))
+const mount = async (items: TranscriptItem[], running = false, onSignIn?: () => void) => {
+  vi.doMock('../../src/lib/api.ts', () => ({ api: { activity: async () => ({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] }), draft: async () => ({ text: '' }), saveDraft: async () => ({}), voiceStatus: async () => ({ available: false }) } }))
   vi.doMock('../../src/lib/useVoice.ts', () => ({ useVoice: () => ({ state: 'idle', hint: null, toggle: vi.fn(), stop: vi.fn() }) }))
   const { Chat } = await import('../../src/components/Chat.tsx')
   const onContinue = vi.fn()
   render(<Chat session={session} items={items} running={running} skills={[]} comments={[]}
                onRemoveComment={() => {}} onClearComments={() => {}} onOpenFile={() => {}}
-               density="normal" onContinue={onContinue} />)
+               density="normal" onContinue={onContinue} onSignIn={onSignIn} />)
   return { onContinue }
 }
+
+describe('a turn that failed because the engine\'s login did', () => {
+  it('offers to sign in again beside Continue, and opens the sign-in when pressed', async () => {
+    const onSignIn = vi.fn()
+    const { onContinue } = await mount([error('Failed to authenticate. API Error: 401 OAuth access token has been revoked.', true)], false, onSignIn)
+    expect(screen.getByText('The login was revoked or has expired. Sign in again, then Continue.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in again' }))
+    expect(onSignIn).toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(onContinue).toHaveBeenCalled()
+  })
+
+  it('offers no sign-in for other failures, or where signing in cannot be offered', async () => {
+    await mount([error('fetch failed: ECONNRESET', true)], false, vi.fn())
+    expect(screen.queryByRole('button', { name: 'Sign in again' })).toBeNull()
+    expect(screen.getByText(/The engine could not be reached/)).toBeTruthy()
+  })
+
+  it('recognises the ways an engine says its login lapsed', async () => {
+    const { isAuthFailure } = await import('../../src/components/Chat.tsx')
+    for (const text of ['Failed to authenticate', 'OAuth access token has been revoked', 'Your token expired', 'Not logged in · Please run /login', 'API Error: 401'])
+      expect(isAuthFailure(text)).toBe(true)
+    for (const text of ['API Error: 529 overloaded', 'Process exited with status 2']) expect(isAuthFailure(text)).toBe(false)
+  })
+})
 
 describe('a failure in the log', () => {
   it('offers Continue with an API-failure explanation, and calls back when pressed', async () => {

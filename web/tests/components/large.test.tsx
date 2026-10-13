@@ -25,7 +25,7 @@ describe('Chat', () => {
     const { api, impl, calls } = apiMock()
     impl.draft = vi.fn(async () => ({ text: 'saved draft' }))
     impl.voiceStatus = vi.fn(async () => ({ available: false, hint: 'no whisper' }))
-    impl.activity = vi.fn(async () => ({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] }))
+    impl.activity = vi.fn(async () => ({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] }))
     vi.doMock('../../src/lib/api.ts', () => ({ api }))
     const { Chat } = await import('../../src/components/Chat.tsx')
     const items = [

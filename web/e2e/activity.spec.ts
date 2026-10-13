@@ -26,3 +26,21 @@ test('what the agent is running shows above the composer, and a process can be k
   await panel.getByTestId('finished-tool').filter({ hasText: 'Task' }).getByRole('button').click()
   await expect(panel.getByTestId('tool-output').first()).toHaveText('done')
 })
+
+test('work an agent left in the background shows while it runs, holds the turn open, and the agent is told why', async ({ page }) => {
+  await open(page)
+  await openFreshSession(page)
+  const box = page.getByPlaceholder(/Message the agent/)
+  const sent = page.waitForResponse((response) => /\/api\/session\/[^/]+\/send$/.test(response.url()))
+  await box.fill('BGWAIT'); await box.press('Enter')
+  expect((await sent).status()).toBe(200)
+  const panel = page.getByTestId('activity-panel')
+  await expect(panel).toContainText('2 in the background')
+  await panel.getByRole('button').first().click()
+  const background = page.getByTestId('background-tasks')
+  await expect(background).toContainText('run the whole suite'); await expect(background).toContainText('subagent')
+  // The agent tried to end its turn on "waiting": the app said no, and said what would be lost.
+  await expect(page.locator('main')).toContainText('HELD: Still running in the background: run the whole suite (command); review the change (subagent).')
+  await expect(page.locator('main')).toContainText('ENDED after 1 refusals')
+  await expect(background).toHaveCount(0)
+})

@@ -44,7 +44,7 @@ describe('bridgePrompt', () => {
     const bridge = bridgePrompt(items, 0)!
     expect(bridge).toContain('add a cache')
     expect(bridge).toContain('added it to store.ts')
-    expect(bridge).toMatch(/did not see/)
+    expect(bridge).toMatch(/not in your own history/)
   })
   it('returns null when the engine has seen everything', () => {
     const items = [item('user', 'hi'), item('assistant', 'hello')]

@@ -3,7 +3,7 @@ import { api, type PlanUsageResponse, type UsageBucket, type UsageReport } from 
 import { resetsIn, resetsOn } from '../lib/usageFormat.ts'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
 import { Markdown } from './Markdown.tsx'
-import type { Project } from '../../shared/types.ts'
+import type { EngineKind, Project } from '../../shared/types.ts'
 
 const CATEGORIES = [
   { id: 'claudemd', label: 'CLAUDE.md' },
@@ -134,41 +134,85 @@ export function InfraTab() {
 }
 
 
+const USAGE_ENGINE_KEY = 'orchestrator.usageEngine'
+/** Claude's transcripts count messages; Codex's count requests, of which a turn makes several. */
+const USAGE_WORDING: Record<EngineKind, { name: string; unit: string; counted: string; limitsHelp: string | null }> = {
+  claude: {
+    name: 'Claude', unit: 'Claude Code message', counted: 'messages',
+    limitsHelp: 'https://support.claude.com/en/articles/11647753-understanding-claude-code-usage-limits',
+  },
+  codex: { name: 'Codex', unit: 'Codex request', counted: 'requests', limitsHelp: null },
+}
+
+function rememberedEngine(): EngineKind {
+  try { return localStorage.getItem(USAGE_ENGINE_KEY) === 'codex' ? 'codex' : 'claude' } catch { return 'claude' }
+}
+
 export function UsageTab() {
+  const [engine, setEngine] = useState<EngineKind>(rememberedEngine)
   const [usage, setUsage] = useState<PlanUsageResponse | null>(null)
   const [report, setReport] = useState<UsageReport | null>(null)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
+    // An answer for the engine that was showing must not land on the one showing now.
+    let current = true
+    setUsage(null)
+    setReport(null)
+    const settle = <T,>(set: (value: T) => void) => (value: T) => { if (current) set(value) }
     const load = () => {
-      void api.planUsage().then(setUsage).catch((error) => setUsage({ error: error.message }))
-      void api.usage().then(setReport).catch(() => {})
+      void api.planUsage(engine).then(settle(setUsage)).catch((error) => settle(setUsage)({ error: error.message }))
+      void api.usage(engine).then(settle(setReport)).catch(() => {})
     }
     load()
     const refresh = setInterval(load, 60_000)
     const tick = setInterval(() => setNow(Date.now()), 30_000)
-    return () => { clearInterval(refresh); clearInterval(tick) }
-  }, [])
+    return () => { current = false; clearInterval(refresh); clearInterval(tick) }
+  }, [engine])
 
-  const session = usage && !('error' in usage) ? usage.limits.find((limit) => limit.group === 'session') : null
-  const weekly = usage && !('error' in usage) ? usage.limits.filter((limit) => limit.group === 'weekly') : []
+  const choose = (next: EngineKind) => {
+    setEngine(next)
+    try { localStorage.setItem(USAGE_ENGINE_KEY, next) } catch { /* private mode */ }
+  }
+  const wording = USAGE_WORDING[engine]
+  const limitsOf = (group: string) => (usage && !('error' in usage) ? usage.limits.filter((limit) => limit.group === group) : [])
+  const sessionLimits = limitsOf('session')
+  const weekly = limitsOf('weekly')
   const active = report?.blocks.find((block) => block.isActive) ?? null
+  // A session's totals span every engine it ran on, so this table is the same on both sides.
+  const spent = (report?.sessions ?? [])
+    .filter((entry) => entry.totalCostUSD > 0 || entry.outputTokens > 0)
+    .sort((a, b) => b.totalCostUSD - a.totalCostUSD)
 
   return (
     <div className="mx-auto w-full max-w-4xl overflow-y-auto px-8 py-10 text-[15px]">
-      {/* ---- exactly the Claude usage page ---- */}
-      {!usage ? <div className="text-ink-400">Asking Claude…</div>
+      <div className="mb-10 inline-flex gap-1 rounded-lg border border-ink-800 p-1" role="tablist" aria-label="Engine">
+        {(Object.keys(USAGE_WORDING) as EngineKind[]).map((kind) => (
+          <button key={kind} role="tab" aria-selected={engine === kind} onClick={() => choose(kind)}
+            className={`rounded-md px-4 py-1.5 text-[13px] ${engine === kind ? 'bg-ink-700 text-white' : 'text-ink-400 hover:text-ink-100'}`}>
+            {USAGE_WORDING[kind].name}
+          </button>))}
+      </div>
+
+      {/* ---- the plan's own limits, as the engine reports them ---- */}
+      {!usage ? <div className="text-ink-400">Asking {wording.name}…</div>
         : 'error' in usage ? <div className="text-ink-300">{usage.error}</div>
         : (
           <>
             <div className="mb-10 flex items-baseline gap-3">
               <h1 className="text-[22px] font-semibold text-white">Plan usage limits</h1>
               <span className="text-[18px] text-ink-400">{usage.plan}</span>
+              {engine === 'codex' && (
+                <span className="text-[13px] text-ink-500">
+                  as of {new Date(usage.fetchedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })},
+                  {' '}when Codex last ran here
+                </span>)}
             </div>
-            {session && <LimitRow label={session.label} sub={resetsIn(session.resetsAt, now)} percent={session.percent} />}
+            {sessionLimits.map((limit) => (
+              <LimitRow key={limit.kind + limit.label} label={limit.label} sub={resetsIn(limit.resetsAt, now)} percent={limit.percent} />))}
             <h2 className="mb-8 mt-14 text-[22px] font-semibold text-white">Weekly limits</h2>
-            <a className="mb-10 inline-block text-[15px] text-[#7aa2ff] underline underline-offset-4"
-               href="https://support.claude.com/en/articles/11647753-understanding-claude-code-usage-limits"
-               target="_blank" rel="noreferrer">Learn more about usage limits</a>
+            {wording.limitsHelp && (
+              <a className="mb-10 inline-block text-[15px] text-[#7aa2ff] underline underline-offset-4"
+                 href={wording.limitsHelp} target="_blank" rel="noreferrer">Learn more about usage limits</a>)}
             {weekly.map((limit) => (
               <LimitRow key={limit.kind + limit.label} label={limit.label} sub={resetsOn(limit.resetsAt)} percent={limit.percent} />))}
             {usage.extra && (
@@ -191,15 +235,15 @@ export function UsageTab() {
         <>
           <h2 className="mb-2 mt-20 text-[22px] font-semibold text-white">What this machine has spent</h2>
           <p className="mb-8 text-[13px] text-ink-400">
-            API-equivalent cost of every Claude Code message in the last 30 days, from
+            API-equivalent cost of every {wording.unit} in the last 30 days, from
             {' '}{report.scannedFiles} transcript files. On a plan you do not pay this; it is what the same
             work would cost on the API.
           </p>
 
           <div className="mb-10 grid grid-cols-3 gap-4">
-            <TotalCard title="Today" bucket={report.today} />
-            <TotalCard title="Last 7 days" bucket={report.last7} />
-            <TotalCard title="Last 30 days" bucket={report.last30} />
+            <TotalCard counted={wording.counted} title="Today" bucket={report.today} />
+            <TotalCard counted={wording.counted} title="Last 7 days" bucket={report.last7} />
+            <TotalCard counted={wording.counted} title="Last 30 days" bucket={report.last30} />
           </div>
 
           <h3 className="mb-3 text-[17px] font-semibold text-white">
@@ -210,19 +254,19 @@ export function UsageTab() {
             </span>}
           </h3>
           {active
-            ? <BucketTable rows={[
+            ? <BucketTable counted={wording.counted} rows={[
                 { name: 'All models', bucket: active },
                 ...Object.entries(active.byModel).sort(([, a], [, b]) => b.costUSD - a.costUSD)
                   .map(([name, bucket]) => ({ name: `  ${name}`, bucket })),
               ]} />
-            : <div className="panel mb-10 p-4 text-ink-400">No messages in the current window.</div>}
+            : <div className="panel mb-10 p-4 text-ink-400">No {wording.counted} in the current window.</div>}
 
           <h3 className="mb-3 mt-10 text-[17px] font-semibold text-white">By model, last 30 days</h3>
-          <BucketTable rows={Object.entries(report.byModel).sort(([, a], [, b]) => b.costUSD - a.costUSD)
+          <BucketTable counted={wording.counted} rows={Object.entries(report.byModel).sort(([, a], [, b]) => b.costUSD - a.costUSD)
             .map(([name, bucket]) => ({ name, bucket }))} />
 
           <h3 className="mb-3 mt-10 text-[17px] font-semibold text-white">By day</h3>
-          <BucketTable rows={report.daily.slice(0, 30).map((day) => ({
+          <BucketTable counted={wording.counted} rows={report.daily.slice(0, 30).map((day) => ({
             name: new Date(`${day.date}T12:00:00`).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }),
             bucket: day,
             detail: Object.entries(day.byModel).sort(([, a], [, b]) => b.costUSD - a.costUSD)
@@ -230,7 +274,7 @@ export function UsageTab() {
           }))} />
 
           <h3 className="mb-3 mt-10 text-[17px] font-semibold text-white">By project, last 30 days</h3>
-          <BucketTable rows={report.byProject.slice(0, 25).map((entry) => ({ name: entry.project, bucket: entry }))} />
+          <BucketTable counted={wording.counted} rows={report.byProject.slice(0, 25).map((entry) => ({ name: entry.project, bucket: entry }))} />
 
           <h3 className="mb-3 mt-10 text-[17px] font-semibold text-white">Orchestrator sessions</h3>
           <div className="panel mb-10 overflow-x-auto">
@@ -241,8 +285,7 @@ export function UsageTab() {
                     <th className="p-3 text-right">Out</th><th className="p-3 text-right">Cost</th></tr>
               </thead>
               <tbody>
-                {report.sessions.filter((entry) => entry.totalCostUSD > 0 || entry.outputTokens > 0)
-                  .sort((a, b) => b.totalCostUSD - a.totalCostUSD).map((entry) => (
+                {spent.map((entry) => (
                   <tr key={entry.id} className="border-t border-ink-800">
                     <td className="max-w-[280px] truncate p-3">{entry.title}</td>
                     <td className="p-3 text-accent">{entry.engine}</td>
@@ -254,7 +297,7 @@ export function UsageTab() {
                 <tr className="border-t border-ink-700 font-semibold">
                   <td className="p-3" colSpan={5}>Total</td>
                   <td className="p-3 text-right font-mono">
-                    ${report.sessions.reduce((sum, entry) => sum + entry.totalCostUSD, 0).toFixed(3)}
+                    ${spent.reduce((sum, entry) => sum + entry.totalCostUSD, 0).toFixed(3)}
                   </td>
                 </tr>
               </tbody>
@@ -275,7 +318,7 @@ export function UsageTab() {
               <tbody>
                 {Object.entries(report.pricing).map(([model, rates]) => (
                   <tr key={model} className="border-t border-ink-800">
-                    <td className="p-3">{model}{model === 'fable' && <span className="ml-2 text-[11px] text-ink-500">assumed = opus</span>}</td>
+                    <td className="p-3">{model === '*' ? `every ${wording.name} model` : model}{model === 'fable' && <span className="ml-2 text-[11px] text-ink-500">assumed = opus</span>}</td>
                     <td className="p-3 text-right font-mono">${rates.input}</td>
                     <td className="p-3 text-right font-mono">${rates.cacheRead}</td>
                     <td className="p-3 text-right font-mono">${rates.cacheWrite}</td>
@@ -296,24 +339,24 @@ function fmt(value: number): string {
   return String(value)
 }
 
-function TotalCard({ title, bucket }: { title: string; bucket: UsageBucket }) {
+function TotalCard({ title, bucket, counted }: { title: string; bucket: UsageBucket; counted: string }) {
   return (
     <div className="panel p-4">
       <div className="text-[12px] uppercase tracking-wide text-ink-500">{title}</div>
       <div className="mt-1 text-[26px] font-semibold text-white">${bucket.costUSD.toFixed(2)}</div>
       <div className="mt-2 text-[12px] text-ink-400">
-        {fmt(bucket.messages)} messages · {fmt(bucket.output)} out · {fmt(bucket.cacheRead + bucket.cacheWrite)} cache
+        {fmt(bucket.messages)} {counted} · {fmt(bucket.output)} out · {fmt(bucket.cacheRead + bucket.cacheWrite)} cache
       </div>
     </div>
   )
 }
 
-function BucketTable({ rows }: { rows: Array<{ name: string; bucket: UsageBucket; detail?: string }> }) {
+function BucketTable({ rows, counted }: { rows: Array<{ name: string; bucket: UsageBucket; detail?: string }>; counted: string }) {
   return (
     <div className="panel mb-4 overflow-x-auto">
       <table className="w-full text-[13px]">
         <thead className="text-left text-[11px] uppercase tracking-wide text-ink-500">
-          <tr><th className="p-3">&nbsp;</th><th className="p-3 text-right">Messages</th>
+          <tr><th className="p-3">&nbsp;</th><th className="p-3 text-right">{counted[0].toUpperCase() + counted.slice(1)}</th>
               <th className="p-3 text-right">Input</th><th className="p-3 text-right">Cache read</th>
               <th className="p-3 text-right">Cache write</th><th className="p-3 text-right">Output</th>
               <th className="p-3 text-right">Cost</th></tr>

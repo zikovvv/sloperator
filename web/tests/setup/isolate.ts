@@ -9,13 +9,15 @@ import { afterEach } from 'vitest'
  * their state, their worktrees, their ~/.claude, their binaries, or the network.
  */
 const root = mkdtempSync(join(tmpdir(), 'orch-test-'))
-for (const folder of ['state', 'worktrees', 'claude-home', 'claude-projects']) mkdirSync(join(root, folder))
+for (const folder of ['state', 'worktrees', 'claude-home', 'claude-projects', 'codex-home']) mkdirSync(join(root, folder))
 
 export const ISOLATED_ENV = {
   ORCHESTRATOR_STATE_DIR: join(root, 'state'),
   ORCHESTRATOR_WORKTREE_ROOT: join(root, 'worktrees'),
   ORCHESTRATOR_CLAUDE_HOME: join(root, 'claude-home'),
   ORCHESTRATOR_CLAUDE_PROJECTS: join(root, 'claude-projects'),
+  ORCHESTRATOR_CODEX_HOME: join(root, 'codex-home'),
+  ORCHESTRATOR_BROWSE_HOME: root,
   ORCHESTRATOR_BIN_DIR: join(process.cwd(), 'tests/fixtures/bin'),
   ORCHESTRATOR_ENGINES_DIR: join(process.cwd(), 'tests/fixtures/engines'),
   // Port 9 (discard) refuses at once: no test ever waits on Anthropic's real endpoint.

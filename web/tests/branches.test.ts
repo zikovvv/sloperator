@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -9,7 +9,7 @@ import * as git from '../server/git.ts'
 import { planLabel, labelFor } from '../server/planUsage.ts'
 import { titleFromMessage } from '../server/titles.ts'
 import { pidIsAlive, readRunningRecord } from '../server/orphans.ts'
-import { blocksFrom, collectEvents, reportFrom, usageBlocks, DEFAULT_CLAUDE_PRICING, projectOf } from '../server/usage.ts'
+import { blocksFrom, collectEvents, reportFrom, DEFAULT_CLAUDE_PRICING, projectOf } from '../server/usage.ts'
 import { resetsIn } from '../src/lib/usageFormat.ts'
 import { encodeWav } from '../src/lib/wav.ts'
 import { skillCatalog, infraItems, readInfraFile, writeInfraFile } from '../server/infra.ts'
@@ -134,28 +134,33 @@ describe('small modules', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'rr-')), 'running.json'); writeFileSync(path, '{broken')
     expect(readRunningRecord(path)).toEqual({})
   })
-  it('usage: unkeyed and corrupt lines, cache reuse and eviction, walk depth, project fallback, blocks helper', () => {
+  it('usage: unkeyed and corrupt lines, cache reuse and eviction, walk depth, project fallback', async () => {
     const home = mkdtempSync(join(tmpdir(), 'usage-home-'))
     const deep = join(home, '.claude/projects/-Users-jane-Projects-acme/a/b/c/d/e/f/g')
     mkdirSync(deep, { recursive: true })
     const file = join(home, '.claude/projects/-Users-jane-Projects-acme/s.jsonl')
     const line = (extra: any = {}) => JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { model: 'claude-opus-5', usage: { input_tokens: 1, output_tokens: 1 } }, ...extra })
-    writeFileSync(file, [line({ message: { id: 'm1', model: 'claude-opus-5', usage: { input_tokens: 5, output_tokens: 1 } }, requestId: 'r1' }), line({ message: { id: 'm1', model: 'claude-opus-5', usage: { input_tokens: 5, output_tokens: 9 } }, requestId: 'r1' }), line(), 'not json at all but long enough to be parsed as a line', JSON.stringify({ type: 'user' }), line({ message: { model: '<synthetic>', usage: {} } }), line({ timestamp: 'garbage' }), JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: {} })].join('\n'))
+    writeFileSync(file, [line({ message: { id: 'm1', model: 'claude-opus-5', usage: { input_tokens: 5, output_tokens: 1 } }, requestId: 'r1' }), line({ message: { id: 'm1', model: 'claude-opus-5', usage: { input_tokens: 5, output_tokens: 9 } }, requestId: 'r1' }), line(), 'not json at all but long enough to be parsed as a line', JSON.stringify({ type: 'user', note: 'not an assistant line, though long enough to be read' }), line({ message: { model: '<synthetic>', usage: {} } }), line({ timestamp: 'garbage' }), JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: {} })].join('\n'))
     writeFileSync(join(deep, 'too-deep.jsonl'), line())
+    // Beside the transcripts: a file that is not one, and a transcript untouched since before the cutoff.
+    writeFileSync(join(home, '.claude/projects/-Users-jane-Projects-acme/notes.txt'), 'not a transcript')
+    const stale = join(home, '.claude/projects/-Users-jane-Projects-acme/stale.jsonl')
+    writeFileSync(stale, line()); utimesSync(stale, new Date(Date.now() - 7200e3), new Date(Date.now() - 7200e3))
     process.env.ORCHESTRATOR_CLAUDE_PROJECTS = join(home, '.claude/projects')
-    const first = collectEvents(Date.now() - 3600e3)
+    const first = await collectEvents(Date.now() - 3600e3)
     expect(first.events.length).toBe(2)               // m1 merged (max), one unkeyed
     expect(first.events.find((e) => e.key)?.output).toBe(9)
-    const second = collectEvents(Date.now() - 3600e3)  // cache hit
+    const second = await collectEvents(Date.now() - 3600e3)  // cache hit
     expect(second.events.length).toBe(2)
-    rmSync(file); collectEvents(Date.now() - 3600e3)   // eviction path
+    // The same unchanged file, asked about a later window: what fell out of the window is not reported from memory.
+    expect((await collectEvents(Date.now() + 1000)).events).toEqual([])
+    rmSync(file); await collectEvents(Date.now() - 3600e3)   // eviction path
     expect(projectOf(join(home, '.claude/projects/-Users-jane-Projects-acme/x.jsonl'), '/Users/jane')).toBe('acme')
     delete process.env.ORCHESTRATOR_CLAUDE_PROJECTS
     expect(projectOf('/elsewhere/x.jsonl', '/Users/jane')).toBe('elsewhere')
     expect(projectOf('/Users/jane/.claude/projects/-/x.jsonl', '/Users/jane')).toBe('-')
     const report = reportFrom([], DEFAULT_CLAUDE_PRICING, 0)
     expect(report.daily).toEqual([]); expect(blocksFrom([], DEFAULT_CLAUDE_PRICING)).toEqual([])
-    expect(Array.isArray(usageBlocks())).toBe(true)
   })
   it('usageFormat and wav edge branches', () => {
     expect(resetsIn(null)).toBe(''); expect(resetsIn('2026-01-01T00:00:00Z', Date.parse('2026-01-01T00:00:30Z'))).toBe('Resets in 0 min')

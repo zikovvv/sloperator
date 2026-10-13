@@ -15,7 +15,6 @@ export const PROMPT_SERVER = 'orchestrator'
 export const PROMPT_TOOL_NAME = `mcp__${PROMPT_SERVER}__${PROMPT_TOOL}`
 /** The agent's way to rename its own session when the person asks; allowed without a prompt. */
 export const RENAME_TOOL = 'rename_session'
-export const RENAME_TOOL_NAME = `mcp__${PROMPT_SERVER}__${RENAME_TOOL}`
 const PROTOCOL_VERSION = '2025-06-18'
 export const ANSWER_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -92,16 +91,53 @@ function isPromptToolArguments(value: unknown): value is PromptToolArguments {
 
 export type RPCResponse = { status: number; body?: unknown; headers?: Record<string, string> }
 
+/** One tool of the orchestrator's MCP server. What `call` rejects with is told to the agent as the tool's failure. */
+export interface MCPTool {
+  name: string
+  description: string
+  inputSchema: object
+  call: (args: unknown) => Promise<string>
+}
+
+/** Arguments the tool cannot work with at all: a protocol error rather than a failed call. */
+export class InvalidArguments extends Error {}
+
+/** The permission host itself: Claude Code calls it for every prompt and waits for the decision. */
+export function approveTool(onCall: (args: PromptToolArguments) => Promise<PermissionDecision>): MCPTool {
+  return {
+    name: PROMPT_TOOL,
+    description: 'Asks the person at the orchestrator to allow or deny a tool call, or to answer the questions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tool_name: { type: 'string' }, input: { type: 'object' }, tool_use_id: { type: 'string' },
+      },
+    },
+    call: async (args) => {
+      if (!isPromptToolArguments(args)) throw new InvalidArguments('approve needs tool_name, tool_use_id and an input object')
+      return JSON.stringify(await onCall(args))
+    },
+  }
+}
+
+export function renameTool(onRename: (title: string | null) => Promise<string>): MCPTool {
+  return {
+    name: RENAME_TOOL,
+    description: 'Renames this session in the orchestrator. Call it when the person asks to rename or name this session. '
+      + 'Pass title when they said what to call it; leave it out to have a name chosen from the conversation.',
+    inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'The new name, if the person gave one.' } } },
+    call: (args) => {
+      const title = (args as { title?: unknown } | null)?.title
+      return onRename(typeof title === 'string' && title.trim() ? title.trim() : null)
+    },
+  }
+}
+
 /**
- * A Streamable-HTTP MCP server small enough to live in Express: JSON-RPC over POST, one tool.
+ * A Streamable-HTTP MCP server small enough to live in Express: JSON-RPC over POST.
  * Requests get a single JSON body; notifications get 202 with none.
  */
-export async function handleMCP(
-  message: unknown,
-  onCall: (args: PromptToolArguments) => Promise<PermissionDecision>,
-  version: string,
-  onRename: (title: string | null) => Promise<string>,
-): Promise<RPCResponse> {
+export async function handleMCP(message: unknown, tools: MCPTool[], version: string): Promise<RPCResponse> {
   const rpc = message as { jsonrpc?: string; id?: unknown; method?: string; params?: any } | null
   if (!rpc || typeof rpc !== 'object' || rpc.jsonrpc !== '2.0' || typeof rpc.method !== 'string') {
     return { status: 400, body: { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Not a JSON-RPC 2.0 message' } } }
@@ -124,33 +160,17 @@ export async function handleMCP(
     case 'ping':
       return reply({})
     case 'tools/list':
-      return reply({ tools: [{
-        name: PROMPT_TOOL,
-        description: 'Asks the person at the orchestrator to allow or deny a tool call, or to answer the questions.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            tool_name: { type: 'string' }, input: { type: 'object' }, tool_use_id: { type: 'string' },
-          },
-        },
-      }, {
-        name: RENAME_TOOL,
-        description: 'Renames this session in the orchestrator. Call it when the person asks to rename or name this session. '
-          + 'Pass title when they said what to call it; leave it out to have a name chosen from the conversation.',
-        inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'The new name, if the person gave one.' } } },
-      }] })
+      return reply({ tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
     case 'tools/call': {
-      const name = rpc.params?.name
-      if (name !== PROMPT_TOOL && name !== RENAME_TOOL) return fail(-32602, `Unknown tool: ${name}`)
+      const tool = tools.find((candidate) => candidate.name === rpc.params?.name)
+      if (!tool) return fail(-32602, `Unknown tool: ${rpc.params?.name}`)
       if (isNotification) return { status: 202 }
-      const args = rpc.params.arguments
-      if (name === RENAME_TOOL) {
-        const title = typeof args?.title === 'string' && args.title.trim() ? args.title.trim() : null
-        return reply({ content: [{ type: 'text', text: await onRename(title) }] })
+      try {
+        return reply({ content: [{ type: 'text', text: await tool.call(rpc.params.arguments) }] })
+      } catch (error) {
+        if (error instanceof InvalidArguments) return fail(-32602, error.message)
+        return reply({ content: [{ type: 'text', text: (error as Error).message }], isError: true })
       }
-      if (!isPromptToolArguments(args)) return fail(-32602, 'approve needs tool_name, tool_use_id and an input object')
-      const decision = await onCall(args)
-      return reply({ content: [{ type: 'text', text: JSON.stringify(decision) }] })
     }
     default:
       return isNotification ? { status: 202 } : fail(-32601, `Method not found: ${rpc.method}`)

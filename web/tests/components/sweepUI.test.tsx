@@ -12,7 +12,7 @@ const apiMock = (defaults: Record<string, any> = {}) => {
   const api = new Proxy({}, { get: (_t, key: string) => impl[key] ?? ((...args: any[]) => { calls.push([key, args]); return Promise.resolve({ ok: true, id: 'new' }) }) })
   return { api, impl, calls }
 }
-const idle = { running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] }
+const idle = { running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] }
 const session: Session = {
   id: 's1', worktreeID: 'w-main', title: 'Chat', engine: 'claude', accessMode: 'edits', steeringMode: 'queue',
   model: null, effort: null, claudeSessionID: null, codexThreadID: null, isPinned: false, isArchived: false,

@@ -17,6 +17,7 @@ const tabDefaults: Record<string, any> = {
   prs: async () => ({ ok: false, message: 'no gh' }), prComments: async () => ({ ok: false, message: 'no gh' }),
   prDetails: async () => ({ ok: false, message: 'no gh' }),
   tasks: async () => ({ tasks: [], terminals: [] }), infra: async () => ({ items: [] }),
+  models: async () => ({}),   // nothing usable: the built-in list stands
   branches: async () => ({ branches: ['main'], defaultBranch: 'main' }),
   worktreeInfo: async () => ({ liveBranch: 'main', changedFiles: 0, branchesInUse: [] }),
   rawFileURL: (path: string) => `/api/file/raw?path=${encodeURIComponent(path)}`,
@@ -26,7 +27,7 @@ const tabDefaults: Record<string, any> = {
 async function mountApp(store: any, impl: Record<string, any> = {}, transcript?: any[]) {
   impl = { ...tabDefaults, ...impl }
   const calls: Array<[string, any[]]> = []
-  impl.activity ??= async () => ({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] })
+  impl.activity ??= async () => ({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] })
   const api = new Proxy({}, { get: (_t, key: string) => impl[key] ?? ((...args: any[]) => { calls.push([key, args]); return Promise.resolve({ session: { id: 'made' }, id: 'made' }) }) })
   vi.doMock('../../src/lib/api.ts', () => ({ api }))
   vi.doMock('../../src/store.ts', () => ({
@@ -35,9 +36,9 @@ async function mountApp(store: any, impl: Record<string, any> = {}, transcript?:
   }))
   vi.doMock('../../src/components/ReviewPanel.tsx', () => ({ ReviewPanel: (props: any) => (
     <div data-testid="review"><button onClick={() => props.onAddComment({ id: 'c', file: 'a', line: 1, body: 'b' })}>add-comment</button>
-      <button onClick={() => props.onQuote('quoted')}>quote</button><span data-testid="open">{props.open?.path ?? ''}</span>
+      <button onClick={() => props.onQuote('quoted')}>quote</button><span data-testid="open">{props.open?.path ?? ''}</span><span data-testid="open-line">{props.open?.line ?? ''}</span>
       <button onClick={props.onCollapse}>collapse-review</button></div>) }))
-  vi.doMock('../../src/components/TerminalDrawer.tsx', () => ({ TerminalDrawer: (props: any) => <div data-testid="terminal"><button onClick={props.onClose}>hide</button></div> }))
+  vi.doMock('../../src/components/TerminalDrawer.tsx', () => ({ TerminalDrawer: (props: any) => <div data-testid="terminal"><button onClick={props.onClose}>hide</button><span data-testid="sign-in">{props.signIn?.engine ?? ''}</span></div> }))
   vi.doMock('../../src/lib/monaco.ts', () => ({}))
   const { default: App } = await import('../../src/App.tsx')
   const view = render(<App />)
@@ -145,6 +146,24 @@ describe('App', () => {
     expect(screen.getByText('Nothing selected')).toBeTruthy()
   })
 
+  it('signs the session\'s engine in again from a failed turn, in the terminal drawer', async () => {
+    const quiet = { skills: async () => ({ skills: [] }), draft: async () => ({ text: '' }), voiceStatus: async () => ({ available: false, hint: 'x' }) }
+    localStorage.setItem('orchestrator.showTerminal', '0')
+    await mountApp(baseStore(), quiet, [{ id: 'e1', role: 'error', text: 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.', canRetry: true, timestamp: 1 }])
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in again' }))
+    await waitFor(() => expect(screen.getByTestId('sign-in').textContent).toBe('claude'))
+  })
+
+  it('takes the server\'s model catalog when it is one, and keeps the built-in list otherwise', async () => {
+    const catalog = { claude: { strongest: 'claude-x', models: [{ id: 'claude-x', label: 'X 9', featured: true }] }, codex: { strongest: 'g', models: [{ id: 'g', label: 'G', featured: true }] } }
+    const quiet = { skills: async () => ({ skills: [] }), draft: async () => ({ text: '' }), voiceStatus: async () => ({ available: false, hint: 'x' }) }
+    await mountApp(baseStore(), { ...quiet, models: async () => catalog })
+    await waitFor(() => expect([...screen.getByLabelText('Model').querySelectorAll('option')].map((option) => option.textContent)).toContain('X 9'))
+    cleanup(); vi.resetModules()
+    await mountApp(baseStore(), { ...quiet, models: async () => { throw new Error('down') } })
+    await waitFor(() => expect([...screen.getByLabelText('Model').querySelectorAll('option')].map((option) => option.textContent)).toContain('Fable 5.1'))
+  })
+
   it('shows attention dots for turns that ended elsewhere and clears them when opened', async () => {
     const store: any = { ...baseStore(), running: new Set(['s2']) }
     await mountApp(store, { skills: async () => ({ skills: [] }), draft: async () => ({ text: '' }), voiceStatus: async () => ({ available: false, hint: 'x' }) })
@@ -231,11 +250,16 @@ describe('landing, opening and links', () => {
     const store = baseStore()
     await mountApp(store, quiet, [
       { id: 'h1', role: 'user', text: 'go', timestamp: 1 },
-      { id: 'h2', role: 'assistant', text: 'see [abs](/etc/hosts) and ![pic](/var/img.png)', timestamp: 2 },
+      { id: 'h2', role: 'assistant', text: 'see [abs](/etc/hosts) and ![pic](/var/img.png), [a line](src/x.py#L42) and [elsewhere](/other-checkout/src/y.py:7)', timestamp: 2 },
     ])
     await waitFor(() => expect(screen.getByText('abs')).toBeTruthy())
     fireEvent.click(screen.getByText('abs'))
     expect(screen.getByTestId('open').textContent).toBe('/etc/hosts')   // absolute: taken as-is
+    // A line on the reference is a line to open at, not part of the path.
+    fireEvent.click(screen.getByText('a line'))
+    expect(screen.getByTestId('open').textContent).toBe('/acme/src/x.py'); expect(screen.getByTestId('open-line').textContent).toBe('42')
+    fireEvent.click(screen.getByText('elsewhere'))
+    expect(screen.getByTestId('open').textContent).toBe('/other-checkout/src/y.py'); expect(screen.getByTestId('open-line').textContent).toBe('7')
     expect((screen.getByAltText('pic') as HTMLImageElement).src).toContain('%2Fvar%2Fimg.png')
   })
 })
@@ -476,7 +500,7 @@ describe('App corners', () => {
     await mountApp(store, defaults)
     await waitFor(() => expect(screen.getByText('history')).toBeTruthy())
     cleanup(); vi.resetModules()
-    const task = { sessionID: 's1', title: 'First', engine: 'claude', worktree: 'acme', pid: 1, startedAt: Date.now(), tools: [], finished: [], processes: [] }
+    const task = { sessionID: 's1', title: 'First', engine: 'claude', worktree: 'acme', pid: 1, startedAt: Date.now(), tools: [], background: [], finished: [], processes: [] }
     // s2 has said something and is no longer running: that is what earns a dot, and ⌘⇧A goes there.
     const { calls } = await mountApp({ ...store, running: new Set(), transcripts: { ...store.transcripts, s2: [{ id: 'x', role: 'assistant', text: 'done elsewhere', timestamp: 3 }] } },
       { ...defaults, tasks: async () => ({ tasks: [task], terminals: [] }) })

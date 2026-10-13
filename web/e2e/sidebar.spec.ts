@@ -143,10 +143,33 @@ test('add project dialog rejects a missing folder with a toast, not a native ale
   page.on('dialog', (dialog) => { nativeDialogs += 1; void dialog.dismiss() })
   await page.getByRole('button', { name: '+ Add project' }).click()
   const dialog = page.getByRole('dialog', { name: 'Add project' })
-  await dialog.getByRole('textbox').fill('/definitely/not/here')
-  await dialog.getByRole('button', { name: 'OK' }).click()
+  await dialog.getByLabel('Folder path').fill('/definitely/not/here')
+  await dialog.getByRole('button', { name: 'Add this folder' }).click()
   await expect(page.getByRole('status')).toContainText(/No such folder/)
   expect(nativeDialogs).toBe(0)
+})
+
+test('add project browses folders: into one, back up, and adds a git repository by its path', async ({ page }) => {
+  await page.goto('/')
+  const repo = process.env.E2E_REPO!
+  const home = process.env.E2E_STATE_DIR!
+  await page.getByRole('button', { name: '+ Add project' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Add project' })
+  const path = dialog.getByLabel('Folder path')
+  await expect(path).toHaveValue(home)   // starts at the browser's home, never the real one
+  await dialog.getByRole('option', { name: /claude-home/ }).click()
+  await expect(path).toHaveValue(`${home}/claude-home`)
+  await expect(dialog.getByRole('option', { name: /skills/ })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Add and create a repository' })).toBeVisible()   // it is not one yet
+  await dialog.getByRole('button', { name: 'Parent folder' }).click()
+  await expect(path).toHaveValue(home)
+  // A path can still be typed: Enter goes there, and a repository says so.
+  await path.fill(repo); await path.press('Enter')
+  await expect(dialog.getByText('A git repository.')).toBeVisible()
+  const added = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/api/project'))
+  await dialog.getByRole('button', { name: 'Add this folder' }).click()
+  expect((await added).postDataJSON()).toEqual({ path: repo })
+  await expect(dialog).toHaveCount(0)
 })
 
 test('a worktree folds shut over its sessions from its chevron, stays folded across a reload, and opens again', async ({ page }) => {

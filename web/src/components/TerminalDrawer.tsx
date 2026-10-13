@@ -6,10 +6,12 @@ import { api, type TerminalInfo } from '../lib/api.ts'
 import { quiet } from '../lib/quiet.ts'
 
 /** Shells belong to the worktree, not the session; several can be open at once. */
-export function TerminalDrawer({ worktreeID, worktreeName, onClose }: {
+export function TerminalDrawer({ worktreeID, worktreeName, onClose, signIn }: {
   worktreeID: string
   worktreeName: string
   onClose: () => void
+  /** A request to sign an engine in again: a new terminal running its login, brought to the front. */
+  signIn?: { engine: 'claude' | 'codex'; nonce: number } | null
 }) {
   const [terminals, setTerminals] = useState<TerminalInfo[]>([])
   const [activeID, setActiveID] = useState<string | null>(null)
@@ -34,6 +36,16 @@ export function TerminalDrawer({ worktreeID, worktreeName, onClose }: {
     window.addEventListener('orchestrator:terminal-gone', gone)
     return () => window.removeEventListener('orchestrator:terminal-gone', gone)
   }, [worktreeID])
+
+  // One terminal per request: an effect that runs twice (React's dev mode does) must not open two.
+  const signedIn = useRef<number | null>(null)
+  useEffect(() => {
+    if (!signIn || signedIn.current === signIn.nonce) return
+    signedIn.current = signIn.nonce
+    void api.openTerminal(worktreeID, { login: signIn.engine })
+      .then((created) => refresh().then(() => setActiveID(created.id)))
+      .catch((e) => setError(e.message))
+  }, [signIn?.nonce])
 
   const open = () => void api.openTerminal(worktreeID)
     .then((created) => refresh().then(() => setActiveID(created.id)))

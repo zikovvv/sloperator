@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { showNotice } from './lib/notice.ts'
-import type { Project, ServerEvent, Session, TranscriptItem, Worktree } from '../shared/types.ts'
+import type { Project, ServerEvent, Session, StackView, TranscriptItem, Worktree } from '../shared/types.ts'
 
 export interface Store {
   projects: Project[]
   worktrees: Worktree[]
   sessions: Session[]
+  stacks: StackView[]
   running: Set<string>
   /** Sessions with a permission request or a question waiting for the person. */
   asking: Set<string>
@@ -16,7 +17,7 @@ export interface Store {
 /** One socket for the whole app; the server is the source of truth. */
 export function useStore() {
   const [store, setStore] = useState<Store>({
-    projects: [], worktrees: [], sessions: [], running: new Set(), asking: new Set(), transcripts: {}, connected: false,
+    projects: [], worktrees: [], sessions: [], stacks: [], running: new Set(), asking: new Set(), transcripts: {}, connected: false,
   })
   const socketRef = useRef<WebSocket | null>(null)
 
@@ -37,7 +38,7 @@ export function useStore() {
         setStore((prev) => {
           switch (event.type) {
             case 'state':
-              return { ...prev, projects: event.projects, worktrees: event.worktrees, sessions: event.sessions }
+              return { ...prev, projects: event.projects, worktrees: event.worktrees, sessions: event.sessions, stacks: event.stacks ?? [] }
             case 'running':
               return { ...prev, running: new Set(event.sessionIDs), asking: new Set(event.asking ?? []) }
             case 'permission': {

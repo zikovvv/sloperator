@@ -5,9 +5,9 @@ import { ContextMenu } from './ContextMenu.tsx'
 import { compose, formatQuote, hunkLines } from '../lib/quote.ts'
 import { copyText } from '../lib/clipboard.ts'
 import { api } from '../lib/api.ts'
+import { matchChanged } from '../lib/fileRef.ts'
 import { splitTotals } from '../../shared/testPaths.ts'
 import type { DiffFile, PRConversationResult } from '../../shared/types.ts'
-import { gutterChars, sidesOf } from '../lib/diffSides.ts'
 import { startDrag, useStoredValue } from '../lib/resizable.ts'
 import { ensureProviders, languageFor, NAVIGATION_HINT, wireLanguageServers } from '../lib/lspProviders.ts'
 import { ancestorsOf, buildTree, splitTests, type TreeFile, type TreeNode } from '../lib/fileTree.ts'
@@ -23,13 +23,11 @@ const SCOPES = [
   { id: 'remote', label: 'vs Remote' },
 ] as const
 
-const CONTEXTS = [0, 3, 10, 25, 200]
 
 /** Where the reader was in this worktree's review, kept across reloads and panel toggles. */
 interface ReviewState {
   scope: string
   commitSHA: string | null
-  context: number
   selected: string | null
   /** 'diff' shows the change; 'file' reads any file the navigation led to. */
   mode: 'diff' | 'file'
@@ -52,7 +50,7 @@ interface ReviewState {
 
 const initialState = (isMain: boolean): ReviewState => ({
   // A branch is reviewed against what it forked from; the main checkout has only its edits.
-  scope: isMain ? 'uncommitted' : 'branch', commitSHA: null, context: 3, selected: null,
+  scope: isMain ? 'uncommitted' : 'branch', commitSHA: null, selected: null,
   mode: 'diff', treeMode: 'changed', panelOpen: false, viewing: null, history: [], future: [], folds: ['§tests'],
   conversationsOpen: false, treeHeight: 260, wrap: false,
 })
@@ -91,6 +89,8 @@ export function ReviewPanel({
   const [everything, setEverything] = useState<TreeFile[]>([])
   const [commits, setCommits] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  /** Whether the diff has answered at least once for this worktree, so its file list can be trusted. */
+  const [diffKnown, setDiffKnown] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [fileText, setFileText] = useState('')
@@ -101,7 +101,7 @@ export function ReviewPanel({
   const [turn, setTurn] = useState<{ sessionID: string; endedAt: number } | null>(null)
   /** The branch the server measured against, for the two scopes that have one. */
   const [base, setBase] = useState<string | null>(null)
-  const { scope, commitSHA, context, selected, mode, treeMode, panelOpen, viewing, history, folds } = state
+  const { scope, commitSHA, selected, mode, treeMode, panelOpen, viewing, history, folds } = state
   const future = state.future ?? []
   const conversationsOpen = state.conversationsOpen ?? false
   const treeHeight = state.treeHeight ?? 260
@@ -116,7 +116,7 @@ export function ReviewPanel({
     setLoading(true)
     try {
       const [diff, log] = await Promise.all([
-        api.diff(worktreePath, scope, isMain ? null : baseBranch, context, commitSHA ?? undefined, fresh || undefined),
+        api.diff(worktreePath, scope, isMain ? null : baseBranch, 3, commitSHA ?? undefined, fresh || undefined),
         api.commits(worktreePath, isMain ? null : baseBranch).catch(() => ({ commits: [] })),
       ])
       if (mine !== requestRef.current) return
@@ -135,12 +135,12 @@ export function ReviewPanel({
       if (mine !== requestRef.current) return
       setFailure((error as Error).message)
     } finally {
-      if (mine === requestRef.current) setLoading(false)
+      if (mine === requestRef.current) { setLoading(false); setDiffKnown(true) }
     }
-  }, [worktreePath, scope, baseBranch, isMain, context, commitSHA, setState])
+  }, [worktreePath, scope, baseBranch, isMain, commitSHA, setState])
 
   // Another worktree starts from nothing: the previous one's diff must not stand in for it while it loads.
-  useEffect(() => { setFiles([]); setCommits([]); setTurn(null); setBase(null); setFailure(null); freshRef.current = true }, [worktreePath])
+  useEffect(() => { setFiles([]); setCommits([]); setTurn(null); setBase(null); setFailure(null); setDiffKnown(false); freshRef.current = true }, [worktreePath])
   useEffect(() => { void refresh(freshRef.current); freshRef.current = false }, [refresh, generation])
 
   // The whole project is only listed when someone is looking at it.
@@ -180,38 +180,47 @@ export function ReviewPanel({
     void api.file(absolute(viewing.path)).then((file) => setFileText(file.text)).catch((error) => { setFileText(''); setNotice((error as Error).message) })
   }, [mode, viewing, absolute])
 
-  // The chat asked for a file: a changed one opens in the diff, anything else as a file.
+  // The chat asked for a file: a changed one opens in the diff being reviewed, at its line; anything else as a file.
   const lastOpen = useRef<number | null>(null)
+  const [reveal, setReveal] = useState<{ path: string; line: number; nonce: number } | null>(null)
+  const diffEditor = useRef<{ path: string; editor: any } | null>(null)
   useEffect(() => {
-    if (!open || open.nonce === lastOpen.current) return
+    // Until the diff has answered once, nobody knows whether the file is in it: wait rather than guess.
+    if (!open || open.nonce === lastOpen.current || !diffKnown) return
     lastOpen.current = open.nonce
-    const rel = relative(open.path)
-    if (files.some((file) => file.path === rel) && !open.line) patch({ mode: 'diff', selected: rel })
-    else showFile(open.path, open.line)
-  }, [open, files, relative, patch, showFile])
+    const changed = matchChanged(relative(open.path), files.map((file) => file.path))
+    if (!changed) { showFile(open.path, open.line); return }
+    patch({ mode: 'diff', selected: changed, viewing: null })
+    setReveal(open.line ? { path: changed, line: open.line, nonce: open.nonce } : null)
+  }, [open, files, diffKnown, relative, patch, showFile])
+  /** Brings the line the chat named into view, once the diff of its file is the one mounted. */
+  const revealIn = useCallback((mounted: { path: string; editor: any } | null, wanted: typeof reveal) => {
+    if (!mounted || !wanted || mounted.path !== wanted.path) return
+    mounted.editor.revealLineInCenter(wanted.line)
+    mounted.editor.setPosition({ lineNumber: wanted.line, column: 1 })
+  }, [])
+  useEffect(() => { if (mode === 'diff') revealIn(diffEditor.current, reveal) }, [reveal, mode, revealIn])
 
   const file = useMemo(() => files.find((candidate) => candidate.path === selected) ?? files[0] ?? null, [files, selected])
-  const sides = useMemo(() => (file ? sidesOf(file) : null), [file])
-  // What each side's gutter numbers read, current even when a refresh changes the diff under a mounted editor.
-  const gutterRef = useRef({ realLine: [] as Array<number | null>, originalLine: [] as Array<number | null> })
-  if (sides) gutterRef.current = sides
+  // The whole file on each side, as the review shows it: the change inline in its file, as VS Code does.
+  const [sides, setSides] = useState<{ path: string; before: string; after: string } | null>(null)
+  const sidesRef = useRef(0)
+  useEffect(() => {
+    if (!file) { setSides(null); return }
+    const mine = ++sidesRef.current
+    api.diffFile(worktreePath, scope, isMain ? null : baseBranch, file.path, commitSHA ?? undefined)
+      .then((text) => { if (mine === sidesRef.current) setSides({ path: file.path, before: text.before ?? '', after: text.after ?? '' }) })
+      .catch((error: Error) => { if (mine === sidesRef.current) setFailure(error.message) })
+  }, [file, worktreePath, scope, baseBranch, isMain, commitSHA, generation])
   const totals = useMemo(() => splitTotals(files), [files])
   const shownPath = mode === 'file' && viewing ? viewing.path : file?.path ?? null
 
   // The language servers answer for whatever is on screen; the providers are shared by every editor.
   const currentRef = useRef({ workspace: worktreePath, path: shownPath ? absolute(shownPath) : worktreePath })
   currentRef.current = { workspace: worktreePath, path: shownPath ? absolute(shownPath) : worktreePath }
-  // In the diff the rows are the hunks, renumbered from 1; in a file they are the file's lines.
-  const rowsRef = useRef<Array<number | null> | null>(null)
-  rowsRef.current = mode === 'diff' ? sides?.realLine ?? null : null
-  /** Rendered row (1-based) -> real file line, and back; a line the diff does not show has no row. */
-  const toFileLine = useCallback((row: number) => rowsRef.current?.[row - 1] ?? row, [])
-  const toRow = useCallback((line: number) => {
-    const rows = rowsRef.current
-    if (!rows) return line
-    const row = rows.indexOf(line)
-    return row === -1 ? null : row + 1
-  }, [])
+  // Every view shows a whole file, so a rendered row is that line of the file.
+  const toFileLine = useCallback((row: number) => row, [])
+  const toRow = useCallback((line: number) => line, [])
   useEffect(() => {
     wireLanguageServers({ current: () => currentRef.current, toFileLine, toRow, navigate: showFile, notice: setNotice })
   }, [showFile, toFileLine, toRow])
@@ -428,24 +437,19 @@ export function ReviewPanel({
               }}
               options={editorOptions}
             />
-          ) : file && sides ? (
+          ) : file && sides?.path === file.path ? (
             <DiffEditor
-              key={`${file.path}-${context}-${scope}-${commitSHA ?? ''}`}
+              key={`${file.path}-${scope}-${commitSHA ?? ''}`}
               original={sides.before}
               modified={sides.after}
               language={languageFor(file.path)}
               theme="vs-dark"
               beforeMount={beforeMount}
-              options={{
-                ...editorOptions, renderSideBySide: false, renderMarginRevertIcon: false, diffWordWrap: wrap ? 'on' : 'off',
-                lineNumbersMinChars: gutterChars([...sides.realLine, ...sides.originalLine]),
-              }}
+              options={{ ...editorOptions, renderSideBySide: false, renderMarginRevertIcon: false, diffWordWrap: wrap ? 'on' : 'off' }}
               onMount={(editor) => {
-                // The rows are the hunks joined up: each side numbers them by its own file's lines. Set on the two
-                // editors, not in the options above, which Monaco copies onto both sides whenever they change.
-                editor.getOriginalEditor().updateOptions({ lineNumbers: (row: number) => String(gutterRef.current.originalLine[row - 1] ?? '') })
-                editor.getModifiedEditor().updateOptions({ lineNumbers: (row: number) => String(gutterRef.current.realLine[row - 1] ?? '') })
                 wireEditor(editor.getModifiedEditor(), toFileLine, editor)
+                diffEditor.current = { path: file.path, editor: editor.getModifiedEditor() }
+                revealIn(diffEditor.current, reveal)
               }}
             />
           ) : (
@@ -501,10 +505,6 @@ export function ReviewPanel({
                   </optgroup>)}
               </select>
               <div className="flex items-center gap-1.5">
-                <select className="field w-auto flex-1 py-1 text-[11px]" aria-label="Context lines" value={context}
-                        onChange={(event) => patch({ context: Number(event.target.value) })}>
-                  {CONTEXTS.map((count) => <option key={count} value={count}>{count >= 200 ? 'Whole file' : `±${count}`}</option>)}
-                </select>
                 <div className="flex rounded-md bg-ink-850 p-0.5" role="group" aria-label="Which files">
                   {(['changed', 'all'] as const).map((choice) => (
                     <button key={choice} aria-pressed={treeMode === choice}

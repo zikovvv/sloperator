@@ -73,9 +73,9 @@ function TaskCard({ task, now, onOpen, onStop, onKill }: {
         <span className="font-mono text-[11px] text-ink-400">{elapsed(task.startedAt, now)}</span>
         <button className="btn-danger py-0.5 text-[11px]" title="Ends the turn: the agent and everything under it" onClick={onStop}>Stop turn</button>
       </div>
-      {!task.tools.length && !task.processes.length && !task.finished.length && (
+      {!task.tools.length && !task.background.length && !task.processes.length && !task.finished.length && (
         <div className="text-[11px] text-ink-500">Thinking — no tool call or command yet.</div>)}
-      <TurnActivity tools={task.tools} finished={task.finished} processes={task.processes} agents={[]}
+      <TurnActivity tools={task.tools} background={task.background} finished={task.finished} processes={task.processes} agents={[]}
                     running startedAt={task.startedAt} now={now} onKill={onKill} />
     </section>
   )

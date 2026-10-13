@@ -1,11 +1,11 @@
 import express from 'express'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { createServer } from 'node:http'
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { basename, dirname, extname, join } from 'node:path'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, extname, join, isAbsolute } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
 import type { AddressInfo } from 'node:net'
-import type { ServerEvent, Session, SessionActivity, TranscriptItem, Project, Worktree, FinishedTool } from '../shared/types.ts'
+import type { BackgroundTask, ServerEvent, Session, SessionActivity, TranscriptItem, Project, Worktree, FinishedTool, LayerPR, LayerResult, Stack } from '../shared/types.ts'
 import { subagentTranscripts } from './agents.ts'
 import {
   loadState, saveState, loadTranscript, saveTranscript, RUNNING_RECORD, type AppState,
@@ -17,15 +17,23 @@ import { parseDiff } from './diff.ts'
 import { infraItems, readInfraFile, writeInfraFile, skillCatalog, type InfraCategory } from './infra.ts'
 import { usageReport } from './usage.ts'
 import { planUsage } from './planUsage.ts'
-import { listMyPRComments, postLineComment, pullRequestBase, pullRequestBaseFor, pullRequestConversations, reviewerCommand } from './github.ts'
+import { codexPlanUsage, codexRates, codexUsageReport } from './codexUsage.ts'
+import {
+  failureText, listMyPRComments, mergePullRequest, openPullRequestFor, postLineComment, preferredMergeMethod,
+  pullRequestBase, pullRequestBaseFor, pullRequestConversations, retargetPullRequest, reviewerCommand,
+} from './github.ts'
 import { PRCache } from './prCache.ts'
 import { descendantsOf, processTable } from './processes.ts'
+import { openStackPRs, updateLayers } from './stacks.ts'
+import { modelCatalog } from './models.ts'
+import { browseHome, listFolders } from './folders.ts'
 import * as worktreeService from './worktrees.ts'
 import { transcribe, voiceStatus } from './voice.ts'
 import { definition, hover, lspStatus, references, stopAllLanguageServers } from './lsp.ts'
 import { closeAllTerminals, closeTerminal, getTerminal, listTerminals, openTerminal } from './terminals.ts'
 import { allowedRoots, fetchSiteIsAllowed, hostIsLocal, isInsideAny, originIsAllowed } from './guard.ts'
-import { askUserAnswer, handleMCP, PermissionBroker } from './permissions.ts'
+import { approveTool, askUserAnswer, handleMCP, PermissionBroker, PROMPT_SERVER, renameTool, type MCPTool } from './permissions.ts'
+import { CONTROL_OPERATIONS, runControl, type ControlContext } from './control.ts'
 import type { PermissionDecision, PermissionRequest } from '../shared/types.ts'
 import { bridgePrompt, composePrompt, parseComments } from './compose.ts'
 import { isWatching, notify, setAttention, type Notice } from './notify.ts'
@@ -79,6 +87,8 @@ export async function startServer(options: ServerOptions) {
   /** A turn in progress. It always has a pid: a spawn that failed is never tracked here. */
   const running = new Map<string, {
     session: Session; child: ChildProcess; pid: number; engine: Session['engine']; toolItems: Map<string, string>
+    /** What the agent left running behind the turn, and how often it was told not to end the turn on it. */
+    background: BackgroundTask[]; stopsRefused: number
     inFlight: Map<string, InFlightTool>; finished: FinishedTool[]; startedAt: number
   }>()
   /** What the last turn of each session ran, kept for the panel once the turn is over. */
@@ -171,12 +181,27 @@ export async function startServer(options: ServerOptions) {
     return seen.some(Boolean)
   }
 
+  /** A layer's open pull request, from the PR list already fetched: by its head branch or its review checkout. */
+  function layerPR(worktree: Worktree | undefined): LayerPR | null {
+    if (!worktree?.branch) return null
+    const pr = prCache.peek(worktree.projectID).find((candidate) => (candidate.state === 'open' || candidate.state === 'draft')
+      && (candidate.headRefName === worktree.branch || `orch/pr-${candidate.number}` === worktree.branch))
+    return pr ? { number: pr.number, url: pr.url, state: pr.state } : null
+  }
+
+  function stateEvent(): Extract<ServerEvent, { type: 'state' }> {
+    const stacks = state.stacks.map((stack) => ({
+      ...stack, prs: stack.layers.map((id) => layerPR(state.worktrees.find((worktree) => worktree.id === id))),
+    }))
+    return { type: 'state', projects: state.projects, worktrees: state.worktrees, sessions: state.sessions, stacks }
+  }
+
   function pushState() {
-    broadcast({ type: 'state', projects: state.projects, worktrees: state.worktrees, sessions: state.sessions })
+    broadcast(stateEvent())
     void refreshBranches().then((changed) => {
       if (!changed) return
       saveState(state)
-      broadcast({ type: 'state', projects: state.projects, worktrees: state.worktrees, sessions: state.sessions })
+      broadcast(stateEvent())
     }).catch(reportFailure)
     pushRunning()
   }
@@ -336,6 +361,13 @@ export async function startServer(options: ServerOptions) {
         broadcast({ type: 'patch', sessionID: session.id, itemID, toolOutput: target.toolOutput })
         break
       }
+      case 'background': {
+        // Events are only applied for the turn that is running, so it is there.
+        const active = running.get(session.id)!
+        active.background = event.tasks.map((task) => (
+          { ...task, startedAt: active.background.find((known) => known.id === task.id)?.startedAt ?? Date.now() }))
+        break
+      }
       case 'done': {
         const usage: Usage = event.usage
         session.inputTokens += usage.input
@@ -398,7 +430,16 @@ export async function startServer(options: ServerOptions) {
     const otherSeen = state.lastSeen[sessionID]?.[other] ?? 0
     const resuming = session.engine === 'claude' ? session.claudeSessionID : session.codexThreadID
     const needsBridge = !resuming || otherSeen > seen
-    const bridge = needsBridge ? bridgePrompt(items.slice(0, -queued.length), seen) : null
+    // What is being sent is the prompt, not also context: its own messages are left out and nothing else,
+    // wherever they sit (a retry's note follows its message; a reply can follow a queued one).
+    const sending = new Set<TranscriptItem | undefined>()
+    // Newest first, each to a message of its own: the same words queued twice are two messages.
+    for (const text of [...queued].reverse()) {
+      sending.add(items.findLast((item) => item.role === 'user' && item.text === text && !sending.has(item)))
+    }
+    // A thread that starts fresh knows nothing, whatever this engine saw in a thread it no longer has.
+    const unseen = items.slice(resuming ? seen : 0).filter((item) => !sending.has(item))
+    const bridge = needsBridge ? bridgePrompt(unseen, 0) : null
     const prompt = bridge ? bridge + queued.join('\n\n') : queued.join('\n\n')
 
     const executable = findExecutable(session.engine)
@@ -424,7 +465,7 @@ export async function startServer(options: ServerOptions) {
     promptTokens.set(promptToken, sessionID)
     const toolItems = new Map<string, string>()
     const startedCodexItems = new Set<string>()
-    running.set(sessionID, { session, child, pid: child.pid, engine: session.engine, toolItems, inFlight: new Map(), finished: [], startedAt: Date.now() })
+    running.set(sessionID, { session, child, pid: child.pid, engine: session.engine, toolItems, background: [], stopsRefused: 0, inFlight: new Map(), finished: [], startedAt: Date.now() })
     recordRunning()
     state.queuedMessages[sessionID] = []
     saveState(state)
@@ -457,7 +498,11 @@ export async function startServer(options: ServerOptions) {
       const mine = owned()
       if (mine) { lastFinished.set(sessionID, running.get(sessionID)!.finished); running.delete(sessionID) }
       recordRunning()
+      const moveTo = state.worktrees.find((candidate) => candidate.id === pendingMoves.get(sessionID))
+      pendingMoves.delete(sessionID)
       if (!mine) return
+      // Asked to move while it ran: it goes in the same breath as the turn ending, so nothing can start in between.
+      if (moveTo) moveSession(session, moveTo)
       state.lastSeen[sessionID] = {
         ...(state.lastSeen[sessionID] ?? {}), [session.engine]: itemsOf(sessionID).length,
       }
@@ -531,7 +576,8 @@ export async function startServer(options: ServerOptions) {
 
   app.get('/api/state', async (_request, response) => {
     if (await refreshBranches()) { saveState(state); pushState() }
-    response.json({ projects: state.projects, worktrees: state.worktrees, sessions: state.sessions })
+    const { type: _type, ...snapshot } = stateEvent()
+    response.json(snapshot)
   })
 
   app.get('/api/transcript/:id', (request, response) => {
@@ -625,6 +671,9 @@ export async function startServer(options: ServerOptions) {
     const session = state.sessions.find((candidate) => candidate.id === request.params.id)
     if (!session) return response.status(404).json({ error: 'no such session' })
     const body = request.body
+    // A move names a worktree that exists, or nothing at all changes.
+    const target = 'worktreeID' in body ? state.worktrees.find((candidate) => candidate.id === body.worktreeID) : null
+    if (target === undefined) return response.status(404).json({ error: 'No such worktree' })
     const before = { engine: session.engine, accessMode: session.accessMode, model: session.model, effort: session.effort }
     for (const key of SESSION_PATCHABLE) {
       if (key in body) (session as unknown as Record<string, unknown>)[key] = body[key]
@@ -632,6 +681,19 @@ export async function startServer(options: ServerOptions) {
     if ('title' in body) {
       session.titleIsManual = true
       if (inheritWorktreeName(session)) pushState()
+    }
+    // The latest ask is the one that counts: a move that was waiting gives way to it, or to staying put.
+    if (target && pendingMoves.delete(session.id) && target.id === session.worktreeID) {
+      append(session.id, { role: 'info', text: `Session stays in ${target.name}` })
+    }
+    if (target && target.id !== session.worktreeID) {
+      // An agent at work stays where it is, and its session with it: the move waits for the turn to end.
+      if (running.has(session.id)) {
+        pendingMoves.set(session.id, target.id)
+        append(session.id, { role: 'info', text: `Session moves to ${target.name} when this turn ends` })
+      } else {
+        moveSession(session, target)
+      }
     }
     // Switching engines lands on that engine's remembered model, never on one it cannot run.
     if ('engine' in body && !('model' in body)) {
@@ -652,6 +714,28 @@ export async function startServer(options: ServerOptions) {
     applyMidTurn(session, before)
     response.json(session)
   })
+
+  const describeTask = (task: BackgroundTask) => `${task.description} (${task.kind === 'agent' ? 'subagent' : 'command'})`
+  /** How often one turn is told to wait for its background work before it is let go, so it cannot loop forever. */
+  const STOP_REFUSALS = 5
+
+  /** Sessions asked to move while their turn ran, and where to: carried out when the turn ends. */
+  const pendingMoves = new Map<string, string>()
+
+  function moveSession(session: Session, target: Worktree) {
+    session.worktreeID = target.id
+    forgetClaudeThread(session)
+    append(session.id, { role: 'info', text: `Session moved to ${target.name}: ${target.path}` })
+    pushState()
+  }
+
+  /** Whether an agent is at work in this worktree. A session stays with its running turn, so its sessions say. */
+  const turnRunsIn = (worktreeID: string) => state.sessions.some((session) => session.worktreeID === worktreeID && running.has(session.id))
+
+  /** Claude keys a conversation by the folder it ran in: after a move the next turn starts fresh and is handed the conversation so far. */
+  function forgetClaudeThread(session: Session) {
+    session.claudeSessionID = null
+  }
 
   /** Names the session from its whole conversation now, whatever it was called: the person asked. */
   app.post('/api/session/:id/name', async (request, response) => {
@@ -710,43 +794,66 @@ export async function startServer(options: ServerOptions) {
   const KNOWN_SCOPES = ['uncommitted', 'staged', 'branch', 'main', 'remote', 'commit', 'turn'] as const
   const isScope = (value: string): value is (typeof KNOWN_SCOPES)[number] => (KNOWN_SCOPES as readonly string[]).includes(value)
 
+  /**
+   * What a review request compares, from its query: the scope, the branch it is measured against
+   * (echoed back so the panel can say which), and the turn a "turn" scope shows. A scope of null is
+   * a turn scope with no finished turn to show. Null altogether means the request was refused and
+   * answered already.
+   */
+  async function scopeOf(request: express.Request, response: express.Response, path: string): Promise<{
+    scope: gitService.DiffScope | null; base: string | null; turn: { sessionID: string; endedAt: number } | null
+  } | null> {
+    const scopeKind = String(request.query.scope ?? 'uncommitted')
+    if (!isScope(scopeKind)) { response.status(400).json({ error: `Unknown scope: ${scopeKind}` }); return null }
+    const worktree = state.worktrees.find((candidate) => candidate.path === path)
+    if (scopeKind === 'commit') {
+      const sha = commitSHA(request.query.sha)
+      if (!sha) { response.status(400).json({ error: 'sha must be a commit hash' }); return null }
+      return { scope: { kind: 'commit', sha }, base: null, turn: null }
+    }
+    if (scopeKind === 'turn') {
+      const record = state.lastTurn[worktree?.id ?? '']
+      if (!record) return { scope: null, base: null, turn: null }
+      return { scope: { kind: 'turn', before: record.before, after: record.after }, base: null,
+               turn: { sessionID: record.sessionID, endedAt: record.endedAt } }
+    }
+    if (scopeKind === 'branch') {
+      // A path with no worktree record (a plain repository) is measured against whatever the caller says.
+      const base = worktree ? await baseFor(worktree) : (request.query.base ? String(request.query.base) : null)
+      return { scope: { kind: 'branch' }, base, turn: null }
+    }
+    if (scopeKind === 'main') return { scope: { kind: 'main' }, base: await gitService.defaultBranch(path), turn: null }
+    return { scope: { kind: scopeKind }, base: null, turn: null }
+  }
+
   app.get('/api/diff', async (request, response) => {
     const path = String(request.query.path ?? '')
     if (!path) return response.status(400).json({ error: 'path required' })
     if (refuseOutsideRoots(path, response)) return
-    const scopeKind = String(request.query.scope ?? 'uncommitted')
-    if (!isScope(scopeKind)) return response.status(400).json({ error: `Unknown scope: ${scopeKind}` })
     const context = Number(request.query.context ?? 3)
+    const resolved = await scopeOf(request, response, path)
+    if (!resolved) return
+    const { scope, base, turn } = resolved
+    if (!scope) return response.json({ files: [], base, turn })
     // The refresh button: origin's copy of the branch compared against is brought up to date first.
     const fresh = request.query.fresh === '1'
-    const worktree = state.worktrees.find((candidate) => candidate.path === path)
-    let scope: gitService.DiffScope
-    // The branch this one is measured against, for the two scopes that have one; echoed back so the
-    // panel can say which it was.
-    let base: string | null = null
-    let turn: { sessionID: string; endedAt: number } | null = null
-    if (scopeKind === 'commit') {
-      const sha = commitSHA(request.query.sha)
-      if (!sha) return response.status(400).json({ error: 'sha must be a commit hash' })
-      scope = { kind: 'commit', sha }
-    } else if (scopeKind === 'turn') {
-      const record = state.lastTurn[worktree?.id ?? '']
-      if (!record) return response.json({ files: [], base, turn: null })
-      scope = { kind: 'turn', before: record.before, after: record.after }
-      turn = { sessionID: record.sessionID, endedAt: record.endedAt }
-    } else if (scopeKind === 'branch') {
-      // A path with no worktree record (a plain repository) is measured against whatever the caller says.
-      base = worktree ? await baseFor(worktree) : (request.query.base ? String(request.query.base) : null)
-      scope = { kind: 'branch' }
-    } else if (scopeKind === 'main') {
-      base = await gitService.defaultBranch(path)
-      scope = { kind: 'main' }
-    } else {
-      scope = { kind: scopeKind }
-    }
     if (fresh && base) await gitService.fetchBranch(path, base)
-    if (fresh && scopeKind === 'remote') await gitService.fetchBranch(path)
+    if (fresh && scope.kind === 'remote') await gitService.fetchBranch(path)
     response.json({ files: parseDiff(await gitService.diff(path, scope, base, context)), base, turn })
+  })
+
+  /** One file whole, as it is on each side of the scope: what the review's editor shows. */
+  app.get('/api/diff/file', async (request, response) => {
+    const path = String(request.query.path ?? '')
+    const file = String(request.query.file ?? '')
+    if (!path || !file) return response.status(400).json({ error: 'path and file required' })
+    if (refuseOutsideRoots(path, response)) return
+    // The file is named within the worktree; a name that leaves it is not a file of the review.
+    if (isAbsolute(file) || file.split(/[\\/]/).includes('..')) return response.status(400).json({ error: 'file must be a path inside the worktree' })
+    const resolved = await scopeOf(request, response, path)
+    if (!resolved) return
+    if (!resolved.scope) return response.json({ before: null, after: null })
+    response.json(await gitService.sides(path, resolved.scope, resolved.base, file))
   })
 
   app.get('/api/commits', async (request, response) => {
@@ -831,7 +938,13 @@ export async function startServer(options: ServerOptions) {
     const existing = listTerminals(worktree.id)
     // The drawer asks for "one if none": two mounts racing must not open two shells.
     if (request.body.ifNone && existing.length) return response.json(existing[0])
-    const handle = openTerminal(worktree.id, worktree.path, String(request.body.title ?? `Terminal ${existing.length + 1}`))
+    // Signing an engine in again runs its own login, in a shell where its browser link and prompts can be answered.
+    const login = request.body.login === 'claude' || request.body.login === 'codex' ? request.body.login as 'claude' | 'codex' : null
+    const executable = login ? findExecutable(login) : null
+    if (login && !executable) return response.status(400).json({ error: `Could not find \`${login}\` on PATH.` })
+    const command = login ? `'${executable}' ${login === 'claude' ? 'auth login' : 'login'}` : undefined
+    const title = login ? `Sign in to ${login === 'claude' ? 'Claude' : 'Codex'}` : String(request.body.title ?? `Terminal ${existing.length + 1}`)
+    const handle = openTerminal(worktree.id, worktree.path, title, command)
     response.json({ id: handle.id, worktreeID: handle.worktreeID, title: handle.title, pid: handle.process.pid })
   })
 
@@ -858,6 +971,20 @@ export async function startServer(options: ServerOptions) {
   // ---- projects -------------------------------------------------------------------------
 
   const DEFAULT_GROUP = 'main'
+  /** "." and ".." are not folders of their own: as a name they would lead out of the worktree root. */
+  const ONLY_DOTS = /^\.+$/
+  /** A worktree goes into the default folder or one the project has; anything else is refused before it reaches the disk. */
+  const noSuchFolder = (project: Project, group: unknown) =>
+    !!group && group !== DEFAULT_GROUP && !project.worktreeGroups.includes(String(group))
+
+  /** The folders inside a folder (home when none is named), for browsing to a project to add. */
+  app.get('/api/folders', (request, response) => {
+    try {
+      response.json(listFolders(request.query.path ? String(request.query.path) : browseHome()))
+    } catch {
+      response.status(400).json({ error: 'That folder cannot be read' })
+    }
+  })
 
   app.post('/api/project', async (request, response) => {
     const path = String(request.body.path ?? '')
@@ -909,12 +1036,205 @@ export async function startServer(options: ServerOptions) {
     }
     state.sessions = state.sessions.filter((session) => session.worktreeID !== worktreeID)
     state.worktrees = state.worktrees.filter((worktree) => worktree.id !== worktreeID)
+    leaveStack(worktreeID)
   }
+
+  /** A worktree on a new branch and its first session; what the + button and every stack layer are. */
+  async function newWorktreeWithSession(project: Project, body: Record<string, any>) {
+    const created = await worktreeService.createWorktree({
+      projectPath: project.path, projectName: project.name, name: '', branch: null, base: body.base ?? null,
+      checkoutExisting: false, rootOverride: state.settings.worktreeRoot, group: DEFAULT_GROUP,
+    })
+    const worktree: Worktree = {
+      id: crypto.randomUUID(), projectID: project.id, name: created.path.split('/').pop()!,
+      path: created.path, branch: created.branch, baseBranch: body.baseBranch ?? created.base,
+      isMain: false, isExpanded: true, isPinned: false, isArchived: false, group: DEFAULT_GROUP,
+    }
+    state.worktrees.push(worktree)
+    const session: Session = {
+      id: crypto.randomUUID(), worktreeID: worktree.id, title: DEFAULT_SESSION_TITLE,
+      ...inheritedSettings(worktree.id),
+      claudeSessionID: null, codexThreadID: null,
+      isPinned: false, isArchived: false,
+      totalCostUSD: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0,
+    }
+    state.sessions.push(session)
+    return { worktree, session }
+  }
+
+  function nextStackName(projectID: string): string {
+    const taken = new Set(state.stacks.filter((stack) => stack.projectID === projectID).map((stack) => stack.name))
+    let number = 1
+    while (taken.has(`Stack ${number}`)) number += 1
+    return `Stack ${number}`
+  }
+
+  /** A pull request built on another open worktree's branch joins that worktree's stack, right above it. */
+  async function stackOnParent(worktree: Worktree, project: Project, prBase: string | null) {
+    if (!prBase || prBase === await gitService.defaultBranch(project.path)) return
+    const prs = prCache.peek(project.id)
+    const parent = state.worktrees.find((candidate) => candidate.id !== worktree.id && candidate.projectID === project.id
+      && !candidate.isArchived && (candidate.branch === prBase
+        || prs.some((pr) => pr.headRefName === prBase && candidate.branch === `orch/pr-${pr.number}`)))
+    if (!parent) return
+    const stack = state.stacks.find((candidate) => candidate.layers.includes(parent.id))
+    if (stack) stack.layers.splice(stack.layers.indexOf(parent.id) + 1, 0, worktree.id)
+    else {
+      state.stacks.push({ id: crypto.randomUUID(), projectID: project.id, name: nextStackName(project.id),
+        base: await gitService.defaultBranch(project.path), layers: [parent.id, worktree.id] })
+    }
+  }
+
+  function leaveStack(worktreeID: string) {
+    for (const stack of state.stacks) stack.layers = stack.layers.filter((id) => id !== worktreeID)
+    state.stacks = state.stacks.filter((stack) => stack.layers.length)
+  }
+
+  /** A stack's layers that are still worktrees, bottom first, as the stack operations take them. */
+  function layersOf(stack: Stack) {
+    return stack.layers.map((id) => state.worktrees.find((worktree) => worktree.id === id)!)
+      .map((worktree) => ({
+        id: worktree.id, path: worktree.path,
+        title: state.sessions.find((session) => session.worktreeID === worktree.id && session.title !== DEFAULT_SESSION_TITLE)?.title
+          ?? worktree.name,
+      }))
+  }
+
+  const stackOf = (request: express.Request) => state.stacks.find((stack) => stack.id === request.params.id)
+
+  /** A stack and its first layer: a fresh branch from the latest default branch, with a session. */
+  app.post('/api/project/:id/stack', async (request, response) => {
+    const project = state.projects.find((candidate) => candidate.id === request.params.id)
+    if (!project) return response.status(404).json({ error: 'No such project' })
+    try {
+      const { worktree, session } = await newWorktreeWithSession(project, {})
+      const stack: Stack = {
+        id: crypto.randomUUID(), projectID: project.id, name: nextStackName(project.id),
+        base: await gitService.defaultBranch(project.path), layers: [worktree.id],
+      }
+      state.stacks.push(stack)
+      saveState(state)
+      pushState()
+      response.json({ ok: true, stack, worktree, session })
+    } catch (error) {
+      response.status(500).json({ error: (error as Error).message })
+    }
+  })
+
+  /** A new layer on top: a branch from the top layer's branch, measured against it, with a session. */
+  app.post('/api/stack/:id/layer', async (request, response) => {
+    const stack = stackOf(request)
+    if (!stack) return response.status(404).json({ error: 'No such stack' })
+    const project = state.projects.find((candidate) => candidate.id === stack.projectID)!
+    const top = state.worktrees.find((worktree) => worktree.id === stack.layers.at(-1))!
+    try {
+      const parent = await gitService.currentBranch(top.path)
+      if (!parent || parent === 'HEAD') return response.status(400).json({ error: 'The top layer is not on a branch' })
+      const { worktree, session } = await newWorktreeWithSession(project, { base: parent, baseBranch: parent })
+      stack.layers.push(worktree.id)
+      saveState(state)
+      pushState()
+      response.json({ ok: true, worktree, session })
+    } catch (error) {
+      response.status(500).json({ error: (error as Error).message })
+    }
+  })
+
+  app.patch('/api/stack/:id', (request, response) => {
+    const stack = stackOf(request)
+    if (!stack) return response.status(404).json({ error: 'No such stack' })
+    const name = String(request.body.name ?? '').trim()
+    if (!name) return response.status(400).json({ error: 'Give the stack a name' })
+    stack.name = name
+    saveState(state)
+    pushState()
+    response.json({ ok: true, stack })
+  })
+
+  /** Dissolves a stack: its worktrees, branches and sessions all stay, back in their folders. */
+  app.delete('/api/stack/:id', (request, response) => {
+    const stack = stackOf(request)
+    if (!stack) return response.status(404).json({ error: 'No such stack' })
+    state.stacks = state.stacks.filter((candidate) => candidate !== stack)
+    saveState(state)
+    pushState()
+    response.json({ ok: true })
+  })
+
+  app.delete('/api/stack/:id/layer/:worktreeID', (request, response) => {
+    const stack = stackOf(request)
+    if (!stack?.layers.includes(request.params.worktreeID)) return response.status(404).json({ error: 'No such layer' })
+    leaveStack(request.params.worktreeID)
+    saveState(state)
+    pushState()
+    response.json({ ok: true })
+  })
+
+  app.post('/api/stack/:id/update', async (request, response) => {
+    const stack = stackOf(request)
+    if (!stack) return response.status(404).json({ error: 'No such stack' })
+    try {
+      response.json({ ok: true, results: await updateLayers(layersOf(stack)) })
+    } catch (error) {
+      response.status(500).json({ error: (error as Error).message })
+    }
+  })
+
+  app.post('/api/stack/:id/prs', async (request, response) => {
+    const stack = stackOf(request)
+    if (!stack) return response.status(404).json({ error: 'No such stack' })
+    const project = state.projects.find((candidate) => candidate.id === stack.projectID)!
+    try {
+      const results = await openStackPRs(project.path, stack.base, layersOf(stack))
+      prCache.warm(project.id, project.path)
+      response.json({ ok: true, results })
+    } catch (error) {
+      response.status(500).json({ error: (error as Error).message })
+    }
+  })
+
+  /**
+   * Lands the bottom layer: its pull request is merged the way the repository prefers, the next
+   * layer's is pointed at the stack's base, and the rest are brought up to date with it.
+   */
+  app.post('/api/stack/:id/land', async (request, response) => {
+    const stack = stackOf(request)
+    if (!stack) return response.status(404).json({ error: 'No such stack' })
+    const project = state.projects.find((candidate) => candidate.id === stack.projectID)!
+    const [bottom, next] = layersOf(stack)
+    try {
+      const bottomBranch = await gitService.currentBranch(bottom.path)
+      const pr = bottomBranch ? await openPullRequestFor(project.path, bottomBranch) : null
+      if (!pr) return response.status(400).json({ error: `${bottom.title} has no open pull request: open the stack's PRs first` })
+      const method = await preferredMergeMethod(project.path)
+      await mergePullRequest(project.path, pr.number, method)
+      const results: LayerResult[] = [{ worktreeID: bottom.id, branch: bottomBranch!, status: 'landed', message: `#${pr.number} merged (${method})`, url: pr.url }]
+      leaveStack(bottom.id)
+      if (next) {
+        // The new bottom layer is measured against the stack's base from here on, whatever GitHub says next.
+        state.worktrees.find((worktree) => worktree.id === next.id)!.baseBranch = stack.base
+        const nextBranch = await gitService.currentBranch(next.path)
+        const nextPR = nextBranch ? await openPullRequestFor(project.path, nextBranch) : null
+        if (nextPR) await retargetPullRequest(project.path, nextPR.number, stack.base)
+        await gitService.fetchBranch(project.path, stack.base)
+        results.push(...await updateLayers(layersOf(stack), `origin/${stack.base}`))   // the stack still holds the rest
+      }
+      prCache.warm(project.id, project.path)
+      saveState(state)
+      pushState()
+      response.json({ ok: true, results })
+    } catch (error) {
+      saveState(state)
+      pushState()
+      response.status(500).json({ error: failureText(error) })
+    }
+  })
 
   app.post('/api/project/:id/worktree', async (request, response) => {
     const project = state.projects.find((candidate) => candidate.id === request.params.id)
     if (!project) return response.status(404).json({ error: 'No such project' })
     const body = request.body
+    if (noSuchFolder(project, body.group)) return response.status(400).json({ error: `No such folder: ${body.group}` })
     try {
       const created = await worktreeService.createWorktree({
         projectPath: project.path,
@@ -961,10 +1281,11 @@ export async function startServer(options: ServerOptions) {
     if (!project) return response.status(404).json({ error: 'No such project' })
     const name = String(request.body.name ?? '').trim().replace(/[^\w.-]+/g, '-')
     if (!name) return response.status(400).json({ error: 'Give the group a name' })
+    if (ONLY_DOTS.test(name)) return response.status(400).json({ error: 'A folder needs a plain name' })
     project.worktreeGroups = [...new Set([...(project.worktreeGroups), name])]
     saveState(state)
     pushState()
-    response.json({ ok: true, groups: project.worktreeGroups })
+    response.json({ ok: true, name, groups: project.worktreeGroups })
   })
 
   /** The folder order is the display order; "main" may move like any other. */
@@ -999,16 +1320,20 @@ export async function startServer(options: ServerOptions) {
     const current = request.params.name
     const next = String(request.body.name ?? '').trim()
     if (current === DEFAULT_GROUP) return response.status(400).json({ error: 'The main folder keeps its name' })
-    if (!next || next.includes('/')) return response.status(400).json({ error: 'A folder needs a plain name' })
+    if (!next || next.includes('/') || ONLY_DOTS.test(next)) return response.status(400).json({ error: 'A folder needs a plain name' })
     const groups = project.worktreeGroups
     if (!groups.includes(current)) return response.status(404).json({ error: 'No such folder' })
     if (groups.includes(next) || next === DEFAULT_GROUP) return response.status(400).json({ error: `A folder named ${next} already exists` })
     const members = state.worktrees.filter((worktree) => worktree.projectID === project.id && worktree.group === current)
+    if (members.some((worktree) => turnRunsIn(worktree.id))) {
+      return response.status(409).json({ error: 'A turn is running in a worktree of this folder: it can be renamed once the turn ends' })
+    }
     try {
       for (const worktree of members) {
         worktree.path = await worktreeService.moveWorktree(
           project.path, project.name, worktree.path, next, state.settings.worktreeRoot)
         worktree.group = next
+        state.sessions.filter((session) => session.worktreeID === worktree.id).forEach(forgetClaudeThread)
       }
       project.worktreeGroups = groups.map((name) => (name === current ? next : name))
       saveState(state)
@@ -1049,10 +1374,16 @@ export async function startServer(options: ServerOptions) {
     if (worktree.isMain) return response.status(400).json({ error: "A project's own checkout cannot be moved" })
     const project = projectFor(worktree)
     const group = request.body.group ? String(request.body.group) : null
+    if (noSuchFolder(project, group)) return response.status(400).json({ error: `No such folder: ${group}` })
+    // Already there: moving it onto itself would rename its directory for nothing.
+    if ((worktree.group ?? null) === group) return response.json({ ok: true, worktree })
+    // An agent at work here holds this directory by name: moved now, it would write where the checkout used to be.
+    if (turnRunsIn(worktree.id)) return response.status(409).json({ error: 'A turn is running in this worktree: its directory can be moved once the turn ends' })
     try {
       worktree.path = await worktreeService.moveWorktree(
         project.path, project.name, worktree.path, group, state.settings.worktreeRoot)
       worktree.group = group
+      state.sessions.filter((session) => session.worktreeID === worktree.id).forEach(forgetClaudeThread)
       saveState(state)
       pushState()
       response.json({ ok: true, worktree })
@@ -1061,12 +1392,38 @@ export async function startServer(options: ServerOptions) {
     }
   })
 
-  app.patch('/api/worktree/:id', (request, response) => {
+  app.patch('/api/worktree/:id', async (request, response) => {
     const worktree = state.worktrees.find((candidate) => candidate.id === request.params.id)
     if (!worktree) return response.status(404).json({ error: 'No such worktree' })
-    // Only these may change from the UI; id, path, project and isMain are never client-writable.
+    // Only these may change from the UI; id, project and isMain are never client-writable.
     const body = request.body
     if (worktree.isMain && body.isArchived) return response.status(400).json({ error: "A project's own checkout stays in the sidebar" })
+    if ('path' in body && body.path !== worktree.path) {
+      // Repointing: the record follows a checkout that already exists; nothing on disk moves.
+      if (worktree.isMain) return response.status(400).json({ error: "A project's own checkout cannot be repointed" })
+      const project = projectFor(worktree)
+      let path: string
+      try {
+        path = await worktreeService.checkoutAt(project.path, String(body.path))
+      } catch (error) {
+        return response.status(400).json({ error: (error as Error).message })
+      }
+      // From here to the assignment nothing waits, so nothing can start or take the checkout in between.
+      // A running turn keeps the folder it started in, and its diff would compare two checkouts.
+      if (turnRunsIn(worktree.id)) {
+        return response.status(409).json({ error: 'A turn is running in this worktree: stop it before pointing the worktree somewhere else' })
+      }
+      if (state.worktrees.some((other) => other !== worktree && worktreeService.realPath(other.path) === path)) {
+        return response.status(400).json({ error: 'Another worktree already points there' })
+      }
+      // Its own folder under another spelling is not a repoint.
+      if (path !== worktreeService.realPath(worktree.path)) {
+        worktree.path = path
+        worktree.group = worktreeService.folderHolding(project.name, path, project.worktreeGroups, state.settings.worktreeRoot)
+        state.sessions.filter((session) => session.worktreeID === worktree.id).forEach(forgetClaudeThread)
+        await refreshBranches()
+      }
+    }
     for (const key of ['name', 'isPinned', 'isArchived', 'isExpanded', 'baseBranch'] as const) {
       if (key in body) (worktree as unknown as Record<string, unknown>)[key] = body[key]
     }
@@ -1168,13 +1525,18 @@ export async function startServer(options: ServerOptions) {
 
   // ---- usage, pull requests, voice --------------------------------------------------------
 
-  app.get('/api/usage', (_request, response) => {
-    response.json({ ...usageReport(state.settings.claudePricing), sessions: state.sessions })
+  const forCodex = (request: express.Request) => request.query.engine === 'codex'
+
+  app.get('/api/usage', async (request, response) => {
+    const report = forCodex(request)
+      ? await codexUsageReport(codexRates(state.settings.codexPricing))
+      : await usageReport(state.settings.claudePricing)
+    response.json({ ...report, sessions: state.sessions })
   })
 
-  app.get('/api/plan-usage', async (_request, response) => {
+  app.get('/api/plan-usage', async (request, response) => {
     try {
-      response.json(await planUsage())
+      response.json(await (forCodex(request) ? codexPlanUsage() : planUsage()))
     } catch (error) {
       response.json({ error: (error as Error).message })
     }
@@ -1274,15 +1636,17 @@ export async function startServer(options: ServerOptions) {
         projectPath: project.path, projectName: project.name, prNumber: options.prNumber,
         group: options.group, rootOverride: state.settings.worktreeRoot,
       })
+      const prBase = await pullRequestBase(project.path, options.prNumber)
       worktree = {
         id: crypto.randomUUID(), projectID: project.id,
         name: `PR #${options.prNumber}`, path: created.path, branch: created.branch,
         // A pull request is measured against the branch it was opened on, which need not be main.
-        baseBranch: (await pullRequestBase(project.path, options.prNumber)) ?? await gitService.defaultBranch(project.path),
+        baseBranch: prBase ?? await gitService.defaultBranch(project.path),
         isMain: false, isExpanded: true, isPinned: false, isArchived: false,
         group: options.group,
       }
       state.worktrees.push(worktree)
+      await stackOnParent(worktree, project, prBase)
     }
 
     const session: Session = {
@@ -1321,13 +1685,15 @@ export async function startServer(options: ServerOptions) {
         projectPath: project.path, projectName: project.name, prNumber: number,
         branch: String(branch), group: DEFAULT_GROUP, rootOverride: state.settings.worktreeRoot,
       })
+      const prBase = await pullRequestBase(project.path, number)
       const worktree = {
         id: crypto.randomUUID(), projectID: project.id,
         name: created.branch.replace(/^orch\//, ''), path: created.path, branch: created.branch,
-        baseBranch: (await pullRequestBase(project.path, number)) ?? await gitService.defaultBranch(project.path),
+        baseBranch: prBase ?? await gitService.defaultBranch(project.path),
         isMain: false, isExpanded: true, isPinned: false, isArchived: false, group: DEFAULT_GROUP,
       }
       state.worktrees.push(worktree)
+      await stackOnParent(worktree, project, prBase)
       saveState(state)
       pushState()
       response.json({ ok: true, worktree, copied: created.copied, reused: false })
@@ -1377,24 +1743,96 @@ export async function startServer(options: ServerOptions) {
     response.json(lspStatus(String(request.query.path ?? '')))
   })
 
+  // ---- the sidebar's moves, for agents ---------------------------------------------------------
+
+  /** An operation does what the same click does because it goes through the same route. */
+  const controlContext = (sessionID: string | null): ControlContext => ({
+    sessionID,
+    workspace: () => ({
+      projects: state.projects, worktrees: state.worktrees, sessions: state.sessions, stacks: state.stacks,
+      running: [...running.keys()],
+    }),
+    call: async (method, path, body) => {
+      const reply = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+        method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}),
+      })
+      const answer = await reply.json()
+      if (!reply.ok) throw new Error(answer.error)
+      return answer
+    },
+  })
+
+  /** Shows a request in the session's chat and waits for the person's answer to it. */
+  function askPerson(sessionID: string, toolName: string, input: unknown, toolUseID: string): Promise<PermissionDecision> {
+    const session = state.sessions.find((candidate) => candidate.id === sessionID)!
+    const permission: PermissionRequest = { id: crypto.randomUUID(), toolName, input, toolUseID, status: 'pending' }
+    const item = append(sessionID, { role: 'permission', text: `${toolName} needs your answer`, permission, engine: session.engine })
+    const asked: Asked = { sessionID, itemID: item.id, permission }
+    permissionItems.set(permission.id, asked)
+    pushRunning()
+    return broker.ask(permission, sessionID, () => settlePermission(permission.id, asked, { status: 'expired' }))
+  }
+
+  /**
+   * The app asks about its own tools itself, the same card for Claude and Codex: a session without
+   * full access changes nothing in the sidebar until the person says yes.
+   */
+  const controlTools = (sessionID: string): MCPTool[] => CONTROL_OPERATIONS.map((operation) => ({
+    name: operation.name, description: operation.description, inputSchema: operation.inputSchema,
+    call: async (args) => {
+      const session = state.sessions.find((candidate) => candidate.id === sessionID)!
+      if (!operation.readOnly && session.accessMode !== 'full') {
+        const decision = await askPerson(sessionID, `mcp__${PROMPT_SERVER}__${operation.name}`, args, crypto.randomUUID())
+        if (decision.behavior === 'deny') throw new Error(decision.message)
+      }
+      return JSON.stringify(await runControl(operation.name, args, controlContext(sessionID)))
+    },
+  }))
+
+  app.get('/api/control', (_request, response) => {
+    response.json({
+      usage: 'POST /api/control/<name> with the arguments as a JSON body.',
+      operations: CONTROL_OPERATIONS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+    })
+  })
+
+  app.post('/api/control/:name', async (request, response) => {
+    try {
+      response.json({ ok: true, result: await runControl(request.params.name, request.body, controlContext(null)) })
+    } catch (error) {
+      response.status(400).json({ error: (error as Error).message })
+    }
+  })
+
   // ---- the permission host Claude Code talks to ---------------------------------------------
 
   app.post('/mcp/:token', async (request, response) => {
     const sessionID = promptTokens.get(request.params.token)
     if (!sessionID) return response.status(404).json({ error: 'No such turn' })
-    const result = await handleMCP(request.body, (args) => {
-      const permission: PermissionRequest = {
-        id: crypto.randomUUID(), toolName: args.tool_name, input: args.input, toolUseID: args.tool_use_id, status: 'pending',
-      }
-      const item = append(sessionID, { role: 'permission', text: `${args.tool_name} needs your answer`, permission })
-      const asked: Asked = { sessionID, itemID: item.id, permission }
-      permissionItems.set(permission.id, asked)
-      pushRunning()
-      return broker.ask(permission, sessionID, () => settlePermission(permission.id, asked, { status: 'expired' }))
-    }, '0.1.0', (title) => renameByRequest(sessionID, title))
+    const result = await handleMCP(request.body, [
+      approveTool((args) => askPerson(sessionID, args.tool_name, args.input, args.tool_use_id)),
+      renameTool((title) => renameByRequest(sessionID, title)),
+      ...controlTools(sessionID),
+    ], '0.1.0')
     for (const [name, value] of Object.entries(result.headers ?? {})) response.set(name, value)
     if (result.body === undefined) return response.status(result.status).end()
     response.status(result.status).json(result.body)
+  })
+  /**
+   * The turn's stop hook: Claude Code asks before it ends a turn. While something the agent started is
+   * still running in the background the answer is no, with why, because ending the turn kills it.
+   */
+  app.get('/mcp/:token/stop', (request, response) => {
+    const active = running.get(promptTokens.get(request.params.token) ?? '')
+    if (!active?.background.length || active.stopsRefused >= STOP_REFUSALS) return response.json({})
+    active.stopsRefused += 1
+    response.json({
+      decision: 'block',
+      reason: `Still running in the background: ${active.background.map(describeTask).join('; ')}. `
+        + 'This turn is a one-shot process: when it ends they are killed, and nothing wakes you when they finish. '
+        + 'Wait for them now (sleep and read their output, or block on them), then give your final answer. '
+        + 'Stop any you no longer need. If one is meant to outlive this turn, stop it, start it again fully detached (nohup … &) and say so.',
+    })
   })
   app.get('/mcp/:token', (_request, response) => response.status(405).end())
   app.delete('/mcp/:token', (_request, response) => response.status(405).end())
@@ -1459,6 +1897,7 @@ export async function startServer(options: ServerOptions) {
       running: !!active,
       startedAt: active?.startedAt ?? null,
       tools: active ? [...active.inFlight.entries()].map(([id, tool]) => ({ id, ...tool })) : [],
+      background: active?.background ?? [],
       finished: active?.finished ?? lastFinished.get(session.id) ?? [],
       processes: active ? descendantsOf(active.pid, processTable()) : [],
       agents: subagentTranscripts(worktreeFor(session).path, session.claudeSessionID),
@@ -1472,6 +1911,7 @@ export async function startServer(options: ServerOptions) {
       sessionID, title: active.session.title, engine: active.engine,
       worktree: worktreeFor(active.session).name, pid: active.pid, startedAt: active.startedAt,
       tools: [...active.inFlight.entries()].map(([id, tool]) => ({ id, ...tool })),
+      background: active.background,
       finished: active.finished,
       processes: descendantsOf(active.pid, table),
     }))
@@ -1490,6 +1930,8 @@ export async function startServer(options: ServerOptions) {
   })
 
   app.get('/api/settings', (_request, response) => response.json(state.settings))
+  /** The models each engine offers now, from the engines' own caches. */
+  app.get('/api/models', (_request, response) => response.json(modelCatalog()))
 
   app.put('/api/settings', (request, response) => {
     state.settings = { ...state.settings, ...(request.body) }
@@ -1530,9 +1972,7 @@ export async function startServer(options: ServerOptions) {
 
   wss.on('connection', (socket) => {
     clients.add(socket)
-    socket.send(JSON.stringify({
-      type: 'state', projects: state.projects, worktrees: state.worktrees, sessions: state.sessions,
-    } satisfies ServerEvent))
+    socket.send(JSON.stringify(stateEvent() satisfies ServerEvent))
     socket.send(JSON.stringify({ type: 'running', sessionIDs: [...running.keys()] } satisfies ServerEvent))
     socket.on('close', () => clients.delete(socket))
   })
@@ -1613,6 +2053,8 @@ export async function startServer(options: ServerOptions) {
   const boundPort = (server.address() as AddressInfo).port
   PORT = boundPort
   console.log(`orchestrator server on http://127.0.0.1:${boundPort}`)
+  // Where this server answers, for `sloperator` run from outside the app.
+  writeFileSync(join(dirname(RUNNING_RECORD), 'server.json'), JSON.stringify({ url: `http://127.0.0.1:${boundPort}`, pid: process.pid }))
 
   /** Stops everything this server started: agents, shells, language servers, timers, sockets. */
   async function stop() {

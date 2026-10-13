@@ -176,7 +176,7 @@ test('F12 in the diff asks the language server about the file line behind the ro
   await page.getByTestId('tree-file').filter({ hasText: 'long.py' }).first().click({ force: true })
   await expect(page.locator('main')).toContainText('src/long.py')   // the file is really selected before the keypress
   await expect(page.locator('.monaco-diff-editor .view-line').first()).toBeAttached({ timeout: 30_000 })
-  // The change is on line 25; with ±3 context the diff's first row is line 22 of the file.
+  // The whole file is shown, so its first row is line 1 of the file.
   const asked = page.waitForRequest((request) => request.url().includes('/api/lsp/definition'), { timeout: 30_000 })
   const input = page.locator('.monaco-diff-editor textarea.inputarea').last()
   await input.focus()
@@ -184,7 +184,7 @@ test('F12 in the diff asks the language server about the file line behind the ro
   await page.keyboard.press('F12')
   const body = (await asked).postDataJSON()
   expect(body.path).toMatch(/src\/long\.py$/)
-  expect(body.line).toBe(21)   // 0-based line 22
+  expect(body.line).toBe(0)
 })
 
 test('⇧F12 in the diff asks for usages by file line, and follows them out of the hunks into the file', async ({ page }) => {
@@ -204,8 +204,8 @@ test('⇧F12 in the diff asks for usages by file line, and follows them out of t
   await page.keyboard.press('Shift+F12')
   const body = (await asked).postDataJSON()
   expect(body.path).toMatch(/src\/long\.py$/)
-  expect(body.line).toBe(21)   // 0-based line 22, the first row of the hunk
-  // The fake server names line 3 of this file and one in other.py: neither is in the hunks, so the file opens at the first.
-  await expect(page.getByText(/2 usages, 2 outside this view/)).toBeVisible()
-  await expect(page.locator('main')).toContainText('src/long.py:3')
+  expect(body.line).toBe(0)
+  // The fake server names line 3 of this file, which the whole-file view shows, and one in other.py, which it does not.
+  await expect(page.getByText('2 usages, 1 outside this view')).toBeVisible()
+  await expect(page.locator('main')).not.toContainText('src/long.py:3')   // something to show here, so no jump
 })

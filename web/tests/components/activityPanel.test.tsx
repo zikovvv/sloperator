@@ -7,6 +7,7 @@ const now = Date.now()
 const busy: SessionActivity = {
   running: true, startedAt: 1000,
   tools: [{ id: 't1', name: 'Task', detail: 'sub agent', startedAt: now - 65_000 }],
+  background: [],
   finished: [],
   processes: [{ pid: 42, ppid: 1, command: 'sleep 30', depth: 1, elapsed: 65, cpu: 0.4 },
               { pid: 43, ppid: 42, command: 'python x.py', depth: 2, elapsed: 3, cpu: 97 }],
@@ -16,7 +17,7 @@ const busy: SessionActivity = {
     { id: 'old', updatedAt: 500, idleMS: 99, prompt: '', rows: [], truncated: false },
   ],
 }
-const idle: SessionActivity = { running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] }
+const idle: SessionActivity = { running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] }
 let activity: ReturnType<typeof vi.fn>
 let killProcess: ReturnType<typeof vi.fn>
 
@@ -34,6 +35,15 @@ const mount = async (running = true) => {
 }
 
 describe('ActivityPanel', () => {
+  it('counts what runs in the background in its one line, and shows nothing else is needed to see it', async () => {
+    activity.mockImplementation(async () => ({ ...idle, running: true, startedAt: 5, background: [{ id: 'b1', kind: 'command', description: 'run the whole suite', startedAt: now - 1000 }] }))
+    await mount()
+    const header = await screen.findByRole('button', { expanded: false })
+    expect(header.textContent).toBe('▸Running now · 1 in the background')
+    fireEvent.click(header)
+    expect(screen.getByTestId('background-tasks').textContent).toContain('run the whole suite')
+  })
+
   it('folds to one line; opens to the tools, the processes with a kill switch, and the subagents', async () => {
     await mount()
     const header = await screen.findByRole('button', { expanded: false })

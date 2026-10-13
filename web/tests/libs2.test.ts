@@ -19,9 +19,15 @@ describe('api defaults', () => {
     expect(String(fetchMock.mock.calls[2][0])).not.toContain('fresh=')
     await api.diff('/w', 'branch', 'main', 3, undefined, true)   // the refresh button: fetch origin first
     expect(String(fetchMock.mock.calls[3][0])).toContain('&fresh=1')
+    await api.diffFile('/w', 'commit', 'main', 'src/a b.py', 'abc')
+    expect(String(fetchMock.mock.calls[4][0])).toBe('/api/diff/file?path=%2Fw&scope=commit&file=src%2Fa%20b.py&base=main&sha=abc')
+    await api.diffFile('/w', 'uncommitted', null, 'src/a.py')
+    expect(String(fetchMock.mock.calls[5][0])).toBe('/api/diff/file?path=%2Fw&scope=uncommitted&file=src%2Fa.py')
+    await api.models()
+    expect(String(fetchMock.mock.calls[6][0])).toBe('/api/models')
     await api.nameSession('s1')   // "Rename with Claude"
-    expect(String(fetchMock.mock.calls[4][0])).toBe('/api/session/s1/name')
-    expect(fetchMock.mock.calls[4][1]!.method).toBe('POST')
+    expect(String(fetchMock.mock.calls[7][0])).toBe('/api/session/s1/name')
+    expect(fetchMock.mock.calls[7][1]!.method).toBe('POST')
   })
 })
 

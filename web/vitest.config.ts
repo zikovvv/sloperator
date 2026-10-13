@@ -3,6 +3,8 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    // Everything a run puts under the temp directory goes in one folder, removed when the run ends.
+    globalSetup: ['tests/setup/tempRoot.ts'],
     // Points every seam at throwaway dirs before any test module loads; see tests/setup/isolate.ts.
     setupFiles: ['tests/setup/isolate.ts'],
     // Two workers at most: a full pool once made the user's laptop unusable.

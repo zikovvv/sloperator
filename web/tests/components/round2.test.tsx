@@ -8,7 +8,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstub
 
 const apiMock = (impl: Record<string, any> = {}) => {
   const calls: Array<[string, any[]]> = []
-  impl.activity ??= async () => ({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] })
+  impl.activity ??= async () => ({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] })
   const api = new Proxy({}, { get: (_t, key: string) => impl[key] ?? ((...args: any[]) => { calls.push([key, args]); return Promise.resolve({ id: 'new', session: { id: 'new' } }) }) })
   vi.doMock('../../src/lib/api.ts', () => ({ api }))
   return { calls, impl }

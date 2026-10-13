@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useStoredValue } from '../lib/resizable.ts'
-import { reportError } from '../lib/toast.ts'
-import type { Project, Session, Worktree } from '../../shared/types.ts'
+import { reportError, toast } from '../lib/toast.ts'
+import type { LayerResult, Project, Session, StackView, Worktree } from '../../shared/types.ts'
 import { api } from '../lib/api.ts'
 import { TextPrompt } from './TextPrompt.tsx'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
+import { FolderPicker } from './FolderPicker.tsx'
 
 const FOLDS_KEY = 'orchestrator.foldedFolders'
 function loadFolds(): Set<string> {
@@ -18,6 +19,8 @@ interface Props {
   onQuickWorktree: (project: Project) => void
   worktrees: Worktree[]
   sessions: Session[]
+  /** Worktrees whose branches build on each other, bottom first. */
+  stacks?: StackView[]
   running: Set<string>
   attention: Set<string>
   /** Sessions with a question or a permission prompt waiting on the person. */
@@ -68,7 +71,7 @@ function RowMenu({ items }: { items: Array<{ label: string; danger?: boolean; ru
 }
 
 export function Sidebar({
-  projects, worktrees, sessions, running, attention, asking, onNewWorktree, onQuickWorktree,
+  projects, worktrees, sessions, stacks = [], running, attention, asking, onNewWorktree, onQuickWorktree,
   selectedSession, selectedWorktree, onSelectSession, onSelectWorktree, onChanged,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -81,6 +84,7 @@ export function Sidebar({
   const [folded, setFolded] = useState<Set<string>>(loadFolds)
   const [dragging, setDragging] = useState<{ kind: 'folder' | 'worktree'; id: string; projectID: string } | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
+  const [addingProject, setAddingProject] = useState(false)
   const toggleFold = (key: string) => setFolded((current) => {
     const next = new Set(current)
     next.has(key) ? next.delete(key) : next.add(key)
@@ -139,6 +143,144 @@ export function Sidebar({
             .flatMap((worktree) => sessions.filter((session) => session.worktreeID === worktree.id))
             .filter((session) => running.has(session.id)).length
 
+          const projectStacks = stacks.filter((stack) => stack.projectID === project.id)
+          const stackedIDs = new Set(projectStacks.flatMap((stack) => stack.layers))
+          const announce = (what: string, results: LayerResult[]) =>
+            toast(results.length ? `${what}:\n${results.map((result) => `${result.branch}: ${result.message}`).join('\n')}` : `${what}: nothing to do`,
+                  results.some((result) => result.status === 'conflict' || result.status === 'failed') ? 'error' : 'info')
+          const openNew = (created: { session: { id: string } }) => { onChanged(); onSelectSession(created.session.id) }
+          const worktreeRow = (worktree: Worktree, layer?: { stack: StackView; index: number }) => {
+                // A worktree matched by its own name shows every session; one matched only through a session shows those.
+                const worktreeSessions = sessionsIn(worktree.id)
+          .filter((session) => !needle || matches(worktree.name) || matches(worktree.branch) || matches(session.title))
+          .sort((a, b) => Number(b.isPinned) - Number(a.isPinned))
+                // Landing in a worktree unfolds it only when there is a choice to make: with a single
+                // session that row is just the chat already on screen.
+                const isOpen = !!needle || (folds[worktree.id] ?? (openWorktreeID === worktree.id && worktreeSessions.length > 1))
+                // Folded — and a single-session worktree always is — the row is all you see, so it
+                // carries the most pressing status of the sessions inside: waiting on you beats working.
+                const inside = sessionsIn(worktree.id)
+                const worktreeTone = inside.some((entry) => asking?.has(entry.id)) ? 'asking' as const
+          : inside.some((entry) => attention.has(entry.id)) ? 'attention' as const
+          : inside.some((entry) => running.has(entry.id)) ? 'running' as const : null
+                const toggleWorktree = () => setFolds((current) => ({ ...current, [worktree.id]: !isOpen }))
+                const tone = selectedWorktree === worktree.id ? 'row-active' : openWorktreeID === worktree.id ? 'row-open' : 'row-idle'
+                return (
+          <div key={worktree.id}>
+            <div
+              className={`row ${tone} py-0.5 pl-5`}
+              onClick={() => onSelectWorktree(worktree.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => event.key === 'Enter' && onSelectWorktree(worktree.id)}
+            >
+              <button className="w-3 shrink-0 text-[10px] text-ink-500 hover:text-ink-200"
+                      aria-label={isOpen ? 'Collapse worktree' : 'Expand worktree'} aria-expanded={isOpen}
+                      onClick={(event) => { event.stopPropagation(); toggleWorktree() }}>
+                {isOpen ? '▾' : '▸'}
+              </button>
+              <span
+                className="cursor-grab text-[10px] text-ink-500 active:cursor-grabbing"
+                draggable={!worktree.isMain}
+                title={worktree.isMain ? undefined : 'Drag onto a folder to move this worktree there'}
+                onClick={(event) => event.stopPropagation()}
+                onDragStart={(event) => {
+                  event.stopPropagation()
+                  setDragging({ kind: 'worktree', id: worktree.id, projectID: project.id })
+                }}
+                onDragEnd={() => { setDragging(null); setDropTarget(null) }}
+              >{worktree.isMain ? '⌂' : '⑂'}</span>
+              {layer && <span className="chip px-1 font-mono text-[9px]" title={`Layer ${layer.index + 1}: builds on ${layer.index ? 'the layer below' : layer.stack.base}`}>{layer.index + 1}</span>}
+              <span className="min-w-0 flex-1 leading-tight">
+                {/* Named by what is being done there: its first session's title, else the branch it was opened on. */}
+                <span className="block truncate text-[12px]" data-testid="worktree-title" title={worktree.name}>
+                  {worktree.isMain || worktree.nameIsManual ? worktree.name
+                    : worktreeSessions.map((entry) => entry.title).find((title) => title && title !== 'New session')
+                      ?? worktree.branch?.replace(/^orch\//, '') ?? worktree.name}
+                </span>
+                <span className="block truncate text-[10px] text-ink-500">
+                  {worktree.branch && <span className="font-mono">{worktree.branch} · </span>}
+                  {`${worktreeSessions.length} session${worktreeSessions.length === 1 ? '' : 's'}`}
+                  {worktreeSessions.some((entry) => running.has(entry.id)) ? ' · working' : ''}
+                </span>
+              </span>
+              {layer && layer.stack.prs[layer.index] && (
+                <a className="chip px-1 text-[9px] text-accent hover:underline" href={layer.stack.prs[layer.index]!.url} target="_blank" rel="noreferrer"
+                   title={`Pull request ${layer.stack.prs[layer.index]!.state}`} onClick={(event) => event.stopPropagation()}>
+                  #{layer.stack.prs[layer.index]!.number}
+                </a>)}
+              {worktreeTone && <Dot tone={worktreeTone} />}
+              {worktree.isPinned && <span className="text-[10px] text-warn" title="Pinned">▲</span>}
+              <button className="icon-button" aria-label="New session" title="New session"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void api.newSession(worktree.id)
+                          .then((created: any) => { onChanged(); if (created?.id) onSelectSession(created.id) })
+                          .catch(report)
+                      }}>+</button>
+              <RowMenu items={[
+                { label: 'New session', run: () => void api.newSession(worktree.id)
+                  .then((created: any) => { onChanged(); if (created?.id) onSelectSession(created.id) }).catch(report) },
+                { label: 'Rename…', run: () => void rename('worktree', worktree.id, worktree.name) },
+                { label: worktree.isPinned ? 'Unpin' : 'Pin to top',
+                  run: () => void api.patchWorktree(worktree.id, { isPinned: !worktree.isPinned }).then(onChanged).catch(report) },
+                ...(worktree.isMain ? [] : [
+                  ...(layer ? [{ label: 'Remove from stack', run: () => void api.removeLayer(layer.stack.id, worktree.id).then(onChanged).catch(report) }]
+                    : [...new Set(['main', ...project.worktreeGroups])]
+                    .filter((target) => target !== (worktree.group || 'main'))
+                    .map((target) => ({
+                      label: `Move to ${target}`,
+                      run: () => void api.moveWorktree(worktree.id, target)
+                        .then(onChanged)
+                        .catch(report),
+                    }))),
+                  { label: 'Archive',
+                    run: () => void api.patchWorktree(worktree.id, { isArchived: true }).then(onChanged).catch(report) },
+                  { label: 'Delete worktree…', danger: true, run: () => setConfirmation({
+                    title: `Do you really want to delete “${worktree.name}”?`,
+                    body: `This deletes ${worktree.path}, any uncommitted changes in it, and `
+                      + `${sessions.filter((entry) => entry.worktreeID === worktree.id).length} session(s). `
+                      + `The branch ${worktree.branch ?? ''} is NOT deleted.`,
+                    confirmLabel: 'Delete',
+                    run: () => void api.deleteWorktree(worktree.id).then(onChanged).catch(report),
+                  }) },
+                ]),
+              ]} />
+            </div>
+
+            {isOpen && worktreeSessions.map((session) => (
+              <div
+                key={session.id}
+                className={`row py-0.5 pl-9 ${selectedSession === session.id ? 'row-active' : 'row-idle'}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => onSelectSession(session.id)}
+                onKeyDown={(event) => event.key === 'Enter' && onSelectSession(session.id)}
+              >
+                <span className={`text-[9px] ${session.engine === 'claude' ? 'text-orange-400' : 'text-teal-400'}`}>●</span>
+                <span className="flex-1 truncate text-[11px]">{session.title}</span>
+                {session.isPinned && <span className="text-[10px] text-warn">▲</span>}
+                {asking?.has(session.id) ? <Dot tone="asking" />
+                  : running.has(session.id) ? <Dot tone="running" />
+                  : attention.has(session.id) ? <Dot tone="attention" /> : null}
+                <RowMenu items={[
+                  { label: 'Rename…', run: () => void rename('session', session.id, session.title) },
+                  { label: 'Rename with Claude', run: () => void api.nameSession(session.id).then(onChanged).catch(report) },
+                  { label: session.isPinned ? 'Unpin' : 'Pin to top',
+                    run: () => void api.patchSession(session.id, { isPinned: !session.isPinned } as any).then(onChanged).catch(report) },
+                  { label: 'Archive',
+                    run: () => void api.patchSession(session.id, { isArchived: true } as any).then(onChanged).catch(report) },
+                  { label: 'Delete session', danger: true,
+                    run: () => setConfirmation({
+                      title: `Delete “${session.title}”?`,
+                      body: 'Only the chat is deleted. The worktree is untouched.',
+                      confirmLabel: 'Delete',
+                      run: () => void api.deleteSession(session.id).then(onChanged).catch(report),
+                    }) },
+                ]} />
+              </div>))}
+          </div>)
+          }
           return (
             <div key={project.id} className="mb-1">
               <div className="group flex items-center gap-1 px-1 py-1">
@@ -153,8 +295,12 @@ export function Sidebar({
                 <button className="icon-button" aria-label="New worktree"
                         title="New worktree on a fresh branch from main — start typing; change the branch at the top of the chat"
                         onClick={() => onQuickWorktree(project)}>+</button>
+                <button className="icon-button" aria-label="New stack"
+                        title="New stack: a worktree whose + adds layers, each branched from the one below"
+                        onClick={() => void api.newStack(project.id).then(openNew).catch(report)}>⧉</button>
                 <RowMenu items={[
                   { label: 'New worktree…', run: () => onNewWorktree(project) },
+                  { label: 'New stack', run: () => void api.newStack(project.id).then(openNew).catch(report) },
                   { label: 'Quick worktree (auto branch, no questions)', run: () => onQuickWorktree(project) },
                   { label: 'Add group directory…', run: () => setAsk({
                     title: `New group in ${project.name}`, label: 'Directory name',
@@ -172,9 +318,47 @@ export function Sidebar({
                 ]} />
               </div>
 
+              {!collapsed.has(project.id) && projectStacks.map((stack) => {
+                const layers = stack.layers.map((id) => projectWorktrees.find((worktree) => worktree.id === id))
+                  .filter((worktree): worktree is Worktree => !!worktree)
+                if (needle && !layers.length) return null
+                const isFolded = folded.has(`${project.id}/stack/${stack.id}`) && !needle
+                return (
+                  <div key={stack.id} data-testid="stack">
+                    <div className="flex items-center gap-1 pl-3 pr-1 pt-1">
+                      <button className="label flex flex-1 items-center gap-1 truncate text-left" aria-expanded={!isFolded}
+                              onClick={() => toggleFold(`${project.id}/stack/${stack.id}`)}>
+                        <span className="w-3 text-ink-500">{isFolded ? '▸' : '▾'}</span>
+                        <span title="A stack: each layer builds on the one below">⧉</span>
+                        {stack.name}
+                        <span className="text-ink-600">({stack.layers.length})</span>
+                      </button>
+                      <button className="icon-button" aria-label="Add layer" title="New layer on top: a branch from the top layer, with its own session"
+                              onClick={() => void api.addLayer(stack.id).then(openNew).catch(report)}>+</button>
+                      <RowMenu items={[
+                        { label: 'Update stack', run: () => void api.updateStack(stack.id).then((result) => { onChanged(); announce(`Updated ${stack.name}`, result.results) }).catch(report) },
+                        { label: 'Open PRs for stack', run: () => void api.openStackPRs(stack.id).then((result) => { onChanged(); announce(`PRs for ${stack.name}`, result.results) }).catch(report) },
+                        { label: 'Land bottom layer…', run: () => setConfirmation({
+                          title: `Land the bottom layer of ${stack.name}?`,
+                          body: `Merges its pull request on GitHub the way the repository prefers, points the next layer's pull request at ${stack.base}, `
+                            + `and merges ${stack.base} into the layers above. Its worktree and branch stay.`,
+                          confirmLabel: 'Land',
+                          run: () => void api.landStack(stack.id).then((result) => { onChanged(); announce(`Landed from ${stack.name}`, result.results) }).catch(report),
+                        }) },
+                        { label: 'Rename stack…', run: () => setAsk({
+                          title: `Rename ${stack.name}`, label: 'Name', initial: stack.name,
+                          run: (name) => void api.renameStack(stack.id, name).then(onChanged).catch(report),
+                        }) },
+                        { label: 'Dissolve stack', run: () => void api.dissolveStack(stack.id).then(onChanged).catch(report) },
+                      ]} />
+                    </div>
+                    {!isFolded && layers.map((worktree) => worktreeRow(worktree, { stack, index: stack.layers.indexOf(worktree.id) }))}
+                  </div>)
+              })}
+
               {!collapsed.has(project.id) && groups.map((groupName) => {
                 const inGroup = projectWorktrees.filter(
-                  (worktree) => (worktree.group || 'main') === groupName)
+                  (worktree) => (worktree.group || 'main') === groupName && !stackedIDs.has(worktree.id))
                 if (needle && !inGroup.length) return null
                 const isFolded = folded.has(`${project.id}/${groupName}`) && !needle
                 return (
@@ -221,131 +405,7 @@ export function Sidebar({
                                 title="Remove empty group"
                                 onClick={() => void api.removeGroup(project.id, groupName).then(onChanged).catch(report)}>×</button>)}
                     </div>)}
-                  {!isFolded && inGroup.map((worktree) => {
-                // A worktree matched by its own name shows every session; one matched only through a session shows those.
-                const worktreeSessions = sessionsIn(worktree.id)
-                  .filter((session) => !needle || matches(worktree.name) || matches(worktree.branch) || matches(session.title))
-                  .sort((a, b) => Number(b.isPinned) - Number(a.isPinned))
-                // Landing in a worktree unfolds it only when there is a choice to make: with a single
-                // session that row is just the chat already on screen.
-                const isOpen = !!needle || (folds[worktree.id] ?? (openWorktreeID === worktree.id && worktreeSessions.length > 1))
-                // Folded — and a single-session worktree always is — the row is all you see, so it
-                // carries the most pressing status of the sessions inside: waiting on you beats working.
-                const inside = sessionsIn(worktree.id)
-                const worktreeTone = inside.some((entry) => asking?.has(entry.id)) ? 'asking' as const
-                  : inside.some((entry) => attention.has(entry.id)) ? 'attention' as const
-                  : inside.some((entry) => running.has(entry.id)) ? 'running' as const : null
-                const toggleWorktree = () => setFolds((current) => ({ ...current, [worktree.id]: !isOpen }))
-                const tone = selectedWorktree === worktree.id ? 'row-active' : openWorktreeID === worktree.id ? 'row-open' : 'row-idle'
-                return (
-                  <div key={worktree.id}>
-                    <div
-                      className={`row ${tone} py-0.5 pl-5`}
-                      onClick={() => onSelectWorktree(worktree.id)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(event) => event.key === 'Enter' && onSelectWorktree(worktree.id)}
-                    >
-                      <button className="w-3 shrink-0 text-[10px] text-ink-500 hover:text-ink-200"
-                              aria-label={isOpen ? 'Collapse worktree' : 'Expand worktree'} aria-expanded={isOpen}
-                              onClick={(event) => { event.stopPropagation(); toggleWorktree() }}>
-                        {isOpen ? '▾' : '▸'}
-                      </button>
-                      <span
-                        className="cursor-grab text-[10px] text-ink-500 active:cursor-grabbing"
-                        draggable={!worktree.isMain}
-                        title={worktree.isMain ? undefined : 'Drag onto a folder to move this worktree there'}
-                        onClick={(event) => event.stopPropagation()}
-                        onDragStart={(event) => {
-                          event.stopPropagation()
-                          setDragging({ kind: 'worktree', id: worktree.id, projectID: project.id })
-                        }}
-                        onDragEnd={() => { setDragging(null); setDropTarget(null) }}
-                      >{worktree.isMain ? '⌂' : '⑂'}</span>
-                      <span className="min-w-0 flex-1 leading-tight">
-                        {/* Named by what is being done there: its first session's title, else the branch it was opened on. */}
-                        <span className="block truncate text-[12px]" data-testid="worktree-title" title={worktree.name}>
-                          {worktree.isMain || worktree.nameIsManual ? worktree.name
-                            : worktreeSessions.map((entry) => entry.title).find((title) => title && title !== 'New session')
-                              ?? worktree.branch?.replace(/^orch\//, '') ?? worktree.name}
-                        </span>
-                        <span className="block truncate text-[10px] text-ink-500">
-                          {worktree.branch && <span className="font-mono">{worktree.branch} · </span>}
-                          {`${worktreeSessions.length} session${worktreeSessions.length === 1 ? '' : 's'}`}
-                          {worktreeSessions.some((entry) => running.has(entry.id)) ? ' · working' : ''}
-                        </span>
-                      </span>
-                      {worktreeTone && <Dot tone={worktreeTone} />}
-                      {worktree.isPinned && <span className="text-[10px] text-warn" title="Pinned">▲</span>}
-                      <button className="icon-button" aria-label="New session" title="New session"
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                void api.newSession(worktree.id)
-                                  .then((created: any) => { onChanged(); if (created?.id) onSelectSession(created.id) })
-                                  .catch(report)
-                              }}>+</button>
-                      <RowMenu items={[
-                        { label: 'New session', run: () => void api.newSession(worktree.id)
-                          .then((created: any) => { onChanged(); if (created?.id) onSelectSession(created.id) }).catch(report) },
-                        { label: 'Rename…', run: () => void rename('worktree', worktree.id, worktree.name) },
-                        { label: worktree.isPinned ? 'Unpin' : 'Pin to top',
-                          run: () => void api.patchWorktree(worktree.id, { isPinned: !worktree.isPinned }).then(onChanged).catch(report) },
-                        ...(worktree.isMain ? [] : [
-                          ...[...new Set(['main', ...project.worktreeGroups])]
-                            .filter((target) => target !== (worktree.group || 'main'))
-                            .map((target) => ({
-                              label: `Move to ${target}`,
-                              run: () => void api.moveWorktree(worktree.id, target)
-                                .then(onChanged)
-                                .catch(report),
-                            })),
-                          { label: 'Archive',
-                            run: () => void api.patchWorktree(worktree.id, { isArchived: true }).then(onChanged).catch(report) },
-                          { label: 'Delete worktree…', danger: true, run: () => setConfirmation({
-                            title: `Do you really want to delete “${worktree.name}”?`,
-                            body: `This deletes ${worktree.path}, any uncommitted changes in it, and `
-                              + `${sessions.filter((entry) => entry.worktreeID === worktree.id).length} session(s). `
-                              + `The branch ${worktree.branch ?? ''} is NOT deleted.`,
-                            confirmLabel: 'Delete',
-                            run: () => void api.deleteWorktree(worktree.id).then(onChanged).catch(report),
-                          }) },
-                        ]),
-                      ]} />
-                    </div>
-
-                    {isOpen && worktreeSessions.map((session) => (
-                      <div
-                        key={session.id}
-                        className={`row py-0.5 pl-9 ${selectedSession === session.id ? 'row-active' : 'row-idle'}`}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => onSelectSession(session.id)}
-                        onKeyDown={(event) => event.key === 'Enter' && onSelectSession(session.id)}
-                      >
-                        <span className={`text-[9px] ${session.engine === 'claude' ? 'text-orange-400' : 'text-teal-400'}`}>●</span>
-                        <span className="flex-1 truncate text-[11px]">{session.title}</span>
-                        {session.isPinned && <span className="text-[10px] text-warn">▲</span>}
-                        {asking?.has(session.id) ? <Dot tone="asking" />
-                          : running.has(session.id) ? <Dot tone="running" />
-                          : attention.has(session.id) ? <Dot tone="attention" /> : null}
-                        <RowMenu items={[
-                          { label: 'Rename…', run: () => void rename('session', session.id, session.title) },
-                          { label: 'Rename with Claude', run: () => void api.nameSession(session.id).then(onChanged).catch(report) },
-                          { label: session.isPinned ? 'Unpin' : 'Pin to top',
-                            run: () => void api.patchSession(session.id, { isPinned: !session.isPinned } as any).then(onChanged).catch(report) },
-                          { label: 'Archive',
-                            run: () => void api.patchSession(session.id, { isArchived: true } as any).then(onChanged).catch(report) },
-                          { label: 'Delete session', danger: true,
-                            run: () => setConfirmation({
-                              title: `Delete “${session.title}”?`,
-                              body: 'Only the chat is deleted. The worktree is untouched.',
-                              confirmLabel: 'Delete',
-                              run: () => void api.deleteSession(session.id).then(onChanged).catch(report),
-                            }) },
-                        ]} />
-                      </div>))}
-                  </div>)
-              })}
+                  {!isFolded && inGroup.map((worktree) => worktreeRow(worktree))}
                 </div>)
               })}
 
@@ -385,12 +445,7 @@ export function Sidebar({
       <div className="border-t border-ink-800 p-1.5">
         <button
           className="row row-idle text-ink-400"
-          onClick={() => setAsk({
-            title: 'Add project', label: 'Folder path (absolute)',
-            placeholder: '/Users/you/Projects/thing',
-            run: (path) => void api.addProject(path).then(onChanged)
-              .catch(report),
-          })}
+          onClick={() => setAddingProject(true)}
         >+ Add project</button>
       </div>
 
@@ -400,6 +455,9 @@ export function Sidebar({
           onCancel={() => setConfirmation(null)}
           onConfirm={() => { confirmation.run(); setConfirmation(null) }}
         />)}
+      {addingProject && (
+        <FolderPicker title="Add project" onCancel={() => setAddingProject(false)}
+                      onPick={(path) => { setAddingProject(false); void api.addProject(path).then(onChanged).catch(report) }} />)}
       {ask && (
         <TextPrompt
           title={ask.title} label={ask.label} initial={ask.initial} placeholder={ask.placeholder}

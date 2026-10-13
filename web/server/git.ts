@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { rmSync } from 'node:fs'
+import { rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -158,6 +158,30 @@ async function scopeArgs(repo: string, scope: DiffScope, base?: string | null): 
       return ['diff', scope.before, scope.after]
     default:
       throw new Error(`Unknown diff scope: ${(scope as { kind: string }).kind}`)
+  }
+}
+
+/** The whole file on each side of a scope, the way the review shows it; null where it does not exist. */
+export async function sides(
+  repo: string, scope: DiffScope, base: string | null | undefined, file: string,
+): Promise<{ before: string | null; after: string | null }> {
+  const at = async (ref: string) => { const shown = await gitResult(repo, ['show', `${ref}:${file}`]); return shown.ok ? shown.stdout : null }
+  const onDisk = () => { const path = join(repo, file); return existsSync(path) ? readFileSync(path, 'utf8') : null }
+  switch (scope.kind) {
+    case 'uncommitted': return { before: await at('HEAD'), after: onDisk() }
+    case 'staged': return { before: await at('HEAD'), after: await at('') }   // ":file" is the index
+    case 'branch':
+    case 'main': {
+      const target = base ? await mergeBase(repo, await resolveRef(repo, base)) : null
+      return { before: await at(target ?? 'HEAD'), after: onDisk() }
+    }
+    case 'remote': {
+      const upstream = (await git(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])).trim()
+      return { before: await at(upstream || 'HEAD'), after: onDisk() }
+    }
+    case 'commit': return { before: await at(`${scope.sha}^`), after: await at(scope.sha) }
+    case 'turn': return { before: await at(scope.before), after: await at(scope.after) }
+    default: throw new Error(`Unknown diff scope: ${(scope as { kind: string }).kind}`)
   }
 }
 

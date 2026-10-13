@@ -18,7 +18,7 @@ const question = (id: string, status: PermissionRequest['status'] = 'pending'): 
 beforeEach(() => {
   vi.resetModules(); Element.prototype.scrollIntoView = vi.fn()
   vi.doMock('../../src/lib/api.ts', () => ({ api: {
-    activity: async () => ({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] }), draft: async () => ({ text: '' }), saveDraft: async () => ({}), voiceStatus: async () => ({ available: false }), answerPermission: vi.fn(async () => ({ ok: true })),
+    activity: async () => ({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] }), draft: async () => ({ text: '' }), saveDraft: async () => ({}), voiceStatus: async () => ({ available: false }), answerPermission: vi.fn(async () => ({ ok: true })),
   } }))
   vi.doMock('../../src/lib/useVoice.ts', () => ({ useVoice: () => ({ state: 'idle', hint: null, toggle: vi.fn(), stop: vi.fn() }) }))
   vi.doMock('../../src/lib/highlight.ts', () => ({ highlight: async () => null, languageOf: () => null }))
@@ -45,6 +45,10 @@ describe('a question in the chat', () => {
     }
     await mount([item('user', 'ASK me twice'), question('q1'), question('q2')], 'normal', true)
     expect(screen.getByTestId('waiting-strip').textContent).toContain('Claude is waiting for 2 answers')
+    cleanup()
+    // The strip names who is asking: the tools of the app itself ask on Codex's behalf too.
+    await mount([item('user', 'file it'), { ...question('q3'), engine: 'codex' }], 'normal', true)
+    expect(screen.getByTestId('waiting-strip').textContent).toContain('Codex is waiting for your answer')
     cleanup()
     // Answered, the strip goes and the card stays as a record.
     await mount([item('user', 'ASK me'), question('q1', 'allowed')], 'normal')

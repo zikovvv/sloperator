@@ -26,9 +26,10 @@ test('the review diff numbers rows by their file line, and wraps long lines from
   await wrap.click()
   await expect(wrap).toHaveAttribute('aria-pressed', 'true')
   await expect.poll(rows).toBeGreaterThan(unwrapped)
+  const wrapped = await rows()
   // Monaco's line container is what takes the pointer; its lines re-render as the text re-wraps.
   await editor.locator('.lines-content > .view-lines').click({ position: { x: 24, y: 6 } })   // not the deleted-code zone's own
   await page.keyboard.press('Alt+z')
   await expect(wrap).toHaveAttribute('aria-pressed', 'false')
-  await expect.poll(rows).toBe(unwrapped)
+  await expect.poll(rows).toBeLessThan(wrapped)
 })

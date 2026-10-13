@@ -23,6 +23,9 @@ describe('store', () => {
     const send = (event: any) => act(() => { socket.onmessage({ data: JSON.stringify(event) }) })
     send({ type: 'state', projects: [{ id: 'p' }], worktrees: [{ id: 'w' }], sessions: [{ id: 's', title: 'a' }] })
     expect(result.current.sessions[0].title).toBe('a')
+    expect(result.current.stacks).toEqual([])   // an older server sends none
+    send({ type: 'state', projects: [{ id: 'p' }], worktrees: [{ id: 'w' }], sessions: [{ id: 's', title: 'a' }], stacks: [{ id: 'k', layers: ['w'] }] })
+    expect(result.current.stacks).toEqual([{ id: 'k', layers: ['w'] }])
     send({ type: 'running', sessionIDs: ['s'] }); expect(result.current.running.has('s')).toBe(true)
     send({ type: 'session', session: { id: 's', title: 'b' } }); expect(result.current.sessions[0].title).toBe('b')
     send({ type: 'session', session: { id: 'zzz', title: 'ignored' } })

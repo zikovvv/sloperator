@@ -22,7 +22,7 @@ afterAll(async () => { await h.stop() })
 describe('a new session starts with the settings you last chose', () => {
   it('is always Claude on the model last used with Claude, with the access and steering last chosen', async () => {
     const first = (await json(await h.post(`/api/worktree/${worktreeA}/session`))).body
-    expect(first).toMatchObject({ engine: 'claude', accessMode: 'edits', steeringMode: 'queue', model: 'claude-fable-5', effort: null })
+    expect(first).toMatchObject({ engine: 'claude', accessMode: 'edits', steeringMode: 'queue', model: 'claude-fable-5-1', effort: null })
 
     await h.patch(`/api/session/${first.id}`, { model: 'claude-opus-5', effort: 'high', accessMode: 'full', steeringMode: 'steer' })
     const sibling = (await json(await h.post(`/api/worktree/${worktreeA}/session`))).body
@@ -64,6 +64,6 @@ describe('a new session starts with the settings you last chose', () => {
     writeFileSync(join(h.stateDir, 'state.json'), JSON.stringify({ settings: { sessionDefaults: { engine: 'codex', model: 'gpt-5.2', effort: 'low', accessMode: 'safe' } } }))
     const old = loadState().settings.sessionDefaults
     expect(old).toEqual({ accessMode: 'safe', steeringMode: 'queue',
-      models: { claude: { model: 'claude-fable-5', effort: null }, codex: { model: 'gpt-5.2', effort: 'low' } } })
+      models: { claude: { model: 'claude-fable-5-1', effort: null }, codex: { model: 'gpt-5.2', effort: 'low' } } })
   })
 })

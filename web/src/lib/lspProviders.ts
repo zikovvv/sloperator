@@ -57,7 +57,8 @@ export function ensureProviders(monaco: Monaco, language: string) {
       const shown = result.locations.filter((location) => inModel(location, path) && wiring!.toRow(location.line) !== null)
       const elsewhere = result.locations.filter((location) => !shown.includes(location))
       if (elsewhere.length) {
-        wiring.notice(`${result.locations.length} usages, ${elsewhere.length} outside this view — opening the first`)
+        // Only when nothing here can be shown does the first of the others open.
+        wiring.notice(`${result.locations.length} usages, ${elsewhere.length} outside this view${shown.length ? '' : ' — opening the first'}`)
         if (!shown.length) wiring.navigate(elsewhere[0].path, elsewhere[0].line)
       }
       return shown.map((location) => ({ uri: model.uri, range: position(wiring!.toRow(location.line)!, location.character) }))

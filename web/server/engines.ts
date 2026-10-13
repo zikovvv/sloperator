@@ -1,7 +1,11 @@
 import { spawn, type ChildProcess, execFileSync } from 'node:child_process'
-import { ANSWER_TIMEOUT_MS, PROMPT_SERVER, PROMPT_TOOL_NAME, RENAME_TOOL, RENAME_TOOL_NAME } from './permissions.ts'
+import { ANSWER_TIMEOUT_MS, PROMPT_SERVER, PROMPT_TOOL_NAME, RENAME_TOOL } from './permissions.ts'
+import { CONTROL_TOOLS } from './control.ts'
 import { homedir } from 'node:os'
 import type { Session } from '../shared/types.ts'
+
+/** The orchestrator's tools the engine need not ask about: the app itself asks, where a change needs a yes. */
+export const OPEN_TOOLS = [RENAME_TOOL, ...CONTROL_TOOLS]
 
 /** GUI-launched processes do not inherit a shell PATH, so build one. */
 /**
@@ -40,7 +44,10 @@ export function claudeArgs(session: Session, prompt: string, resumeID: string | 
   // The orchestrator's own tools reach every session. Both flags take lists, so an option must follow.
   if (promptHost) {
     args.push('--mcp-config', JSON.stringify({ mcpServers: { [PROMPT_SERVER]: { type: 'http', url: promptHost } } }),
-              '--allowedTools', RENAME_TOOL_NAME)
+              '--allowedTools', OPEN_TOOLS.map((tool) => `mcp__${PROMPT_SERVER}__${tool}`).join(','))
+    // The CLI kills background commands and subagents the moment a turn ends. Before it stops it asks the app,
+    // which says no while any are still running.
+    args.push('--settings', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `/usr/bin/curl -s -m 5 '${promptHost}/stop'` }] }] } }))
     // In print mode nobody answers a prompt, so unapproved tools and questions are refused; full access never prompts.
     if (session.accessMode !== 'full') args.push('--permission-prompt-tool', PROMPT_TOOL_NAME)
   }
@@ -67,12 +74,14 @@ export function codexArgs(session: Session, prompt: string, resumeThreadID: stri
   else args.push('--dangerously-bypass-approvals-and-sandbox')
   if (session.model) args.push('--model', session.model)
   if (session.effort) args.push('-c', `model_reasoning_effort="${session.effort}"`)
-  // Codex has its own approvals, so only the rename tool is offered from the orchestrator's server. It is
-  // pre-approved: codex exec has nobody to ask and cancels a tool call that would need asking.
+  // Codex has its own approvals, so the permission host is left out of what it is offered. The rest
+  // is pre-approved: codex exec has nobody to ask and cancels a tool call that would need asking.
   if (promptHost) {
     args.push('-c', `mcp_servers.${PROMPT_SERVER}.url="${promptHost}"`,
-              '-c', `mcp_servers.${PROMPT_SERVER}.enabled_tools=["${RENAME_TOOL}"]`,
-              '-c', `mcp_servers.${PROMPT_SERVER}.default_tools_approval_mode="approve"`)
+              '-c', `mcp_servers.${PROMPT_SERVER}.enabled_tools=${JSON.stringify(OPEN_TOOLS)}`,
+              '-c', `mcp_servers.${PROMPT_SERVER}.default_tools_approval_mode="approve"`,
+              // A change the person is asked about waits for them, far longer than Codex waits for a tool by default.
+              '-c', `mcp_servers.${PROMPT_SERVER}.tool_timeout_sec=${(ANSWER_TIMEOUT_MS + 60_000) / 1000}`)
   }
   if (resumeThreadID) args.push('resume', resumeThreadID)
   args.push(resumeThreadID ? prompt : `${CLAUDE_MD_PREAMBLE}\n\n${prompt}`)
@@ -87,6 +96,8 @@ export type AgentEvent =
   | { type: 'info'; text: string }
   | { type: 'toolEnd'; id: string; output: string | null; failed: boolean }
   | { type: 'done'; summary: string | null; usage: Usage }
+  /** Everything still running behind the turn, each time that changes. */
+  | { type: 'background'; tasks: Array<{ id: string; kind: 'command' | 'agent'; description: string }> }
   | { type: 'failed'; message: string }
 
 export interface Usage {
@@ -112,6 +123,15 @@ export function parseClaudeLine(line: string): AgentEvent[] {
   switch (obj?.type) {
     case 'system':
       if (obj.subtype === 'init' && obj.session_id) return [{ type: 'backend', id: obj.session_id }]
+      if (obj.subtype === 'background_tasks_changed') {
+        return [{ type: 'background', tasks: (obj.tasks as any[]).map((task) => ({
+          id: String(task.task_id), kind: task.task_type === 'local_agent' ? 'agent' : 'command', description: String(task.description),
+        })) }]
+      }
+      // What the CLI cut short, most often by ending the turn on it: said in the chat, where the agent may not have.
+      if (obj.subtype === 'task_notification' && obj.status === 'stopped') {
+        return [{ type: 'info', text: `Stopped before it finished, in the background: ${obj.summary}` }]
+      }
       // Claude Code refused something itself (no host, or --permission-prompts none): say so.
       if (obj.subtype === 'permission_denied') {
         return [{ type: 'info', text: `Permission denied by Claude Code for ${obj.tool_name ?? 'a tool'}${obj.message ? `: ${obj.message}` : ''}` }]

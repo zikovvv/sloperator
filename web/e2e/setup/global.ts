@@ -9,6 +9,10 @@ import { join } from 'node:path'
  * server proxying to it, both on their own ports, so the UI tests click the real page.
  */
 export default async function globalSetup() {
+  // Everything this run creates under the temp directory, the server's and the browsers' files
+  // included, goes in one folder that the teardown removes.
+  const runDir = mkdtempSync(join(tmpdir(), 'orch-e2e-run-'))
+  process.env.TMPDIR = runDir
   const stateDir = mkdtempSync(join(tmpdir(), 'orch-e2e-state-'))
   const repo = mkdtempSync(join(tmpdir(), 'orch-e2e-repo-'))
   const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
@@ -47,6 +51,22 @@ export default async function globalSetup() {
   writeFileSync(join(claudeHome, 'projects/-tmp-e2e/memory/MEMORY.md'), '- [thing](thing.md) — a memory\n')
   writeFileSync(join(claudeHome, 'projects/-tmp-e2e/memory/thing.md'), '---\nname: thing\n---\nremembered\n')
   writeFileSync(join(claudeHome, 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'echo pre' }] }] } }))
+  // A throwaway ~/.codex too: one session log, so the Usage tab's Codex side has a plan and a spend to show.
+  const codexHome = join(stateDir, 'codex-home')
+  const codexLog = join(codexHome, 'sessions', '2026', '01', '01')
+  mkdirSync(codexLog, { recursive: true })
+  const recent = new Date(Date.now() - 60_000).toISOString()
+  writeFileSync(join(codexLog, 'rollout-e2e.jsonl'), [
+    { timestamp: recent, type: 'session_meta', payload: { cwd: '/work/e2e-codex-project' } },
+    { timestamp: recent, type: 'turn_context', payload: { model: 'gpt-e2e' } },
+    { timestamp: recent, type: 'event_msg', payload: {
+      type: 'token_count',
+      info: { total_token_usage: { total_tokens: 3_000_000 }, last_token_usage: { input_tokens: 2_000_000, cached_input_tokens: 1_000_000, output_tokens: 1_000_000 } },
+      rate_limits: { limit_id: 'codex', plan_type: 'plus',
+        primary: { used_percent: 21, window_minutes: 300, resets_at: Math.floor(Date.now() / 1000) + 3 * 3600 },
+        secondary: { used_percent: 64, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 50 * 3600 } },
+    } },
+  ].map((entry) => JSON.stringify(entry)).join('\n'))
   const usageServer = createServer((_request, response) => {
     response.setHeader('content-type', 'application/json')
     response.end(JSON.stringify({ limits: [
@@ -67,6 +87,9 @@ export default async function globalSetup() {
     ORCHESTRATOR_USAGE_URL: `http://127.0.0.1:${usagePort}/usage`,
     ORCHESTRATOR_WHISPER_MODEL: model,
     ORCHESTRATOR_CLAUDE_HOME: claudeHome,
+    ORCHESTRATOR_CODEX_HOME: codexHome,
+    // The folder browser starts here, never in the real home directory.
+    ORCHESTRATOR_BROWSE_HOME: stateDir,
     ORCHESTRATOR_CLAUDE_PROJECTS: join(claudeHome, 'projects'),
     PORT: '8797',
   }
@@ -88,7 +111,8 @@ export default async function globalSetup() {
   process.env.E2E_REPO = repo
   process.env.E2E_STATE_DIR = stateDir
   ;(globalThis as any).__e2e = { server, ui, stateDir, repo }
-  writeFileSync(join(tmpdir(), 'orch-e2e.json'), JSON.stringify({ serverPid: server.pid, uiPid: ui.pid, stateDir, repo, origin }))
+  writeFileSync(join(runDir, 'orch-e2e.json'), JSON.stringify({ serverPid: server.pid, uiPid: ui.pid }))
+  process.env.E2E_RUN_DIR = runDir
   ;(globalThis as any).__usageServer = usageServer
 }
 

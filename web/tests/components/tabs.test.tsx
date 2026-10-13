@@ -92,6 +92,74 @@ describe('UsageTab', () => {
   })
 })
 
+describe('UsageTab engines', () => {
+  const bucket = { messages: 3, input: 10, cacheRead: 20, cacheWrite: 0, output: 7, costUSD: 1.5 }
+  const reportFor = (engine: string) => ({ blocks: [], today: bucket, last7: bucket, last30: bucket, byModel: { [`${engine}-model`]: bucket }, daily: [], byProject: [],
+    pricing: engine === 'codex' ? { '*': { input: 1.25, cacheRead: 0.125, cacheWrite: 0, output: 10 } } : { opus: { input: 15, cacheRead: 1.5, cacheWrite: 18.75, output: 75 } },
+    scannedFiles: 2, sessions: [sessionOf('a', 'by claude'), { ...sessionOf('b', 'by codex'), engine: 'codex' }] })
+  const planFor = (engine: string) => ({ plan: engine === 'codex' ? 'Plus' : 'Max (20x)', fetchedAt: Date.parse('2026-09-02T10:00:00Z'), extra: null, limits: [
+    { kind: 'weekly', group: 'weekly', label: 'All models', percent: 12, resetsAt: new Date(Date.now() + 86400e3).toISOString(), isActive: true },
+    ...(engine === 'codex' ? ['Current session', 'Spark'].map((label) => (
+      { kind: `five-${label}`, group: 'session', label, percent: 4, resetsAt: new Date(Date.now() + 3600e3).toISOString(), isActive: true })) : [])] })
+
+  it('shows Codex the way it shows Claude, asks the server per engine, and remembers the choice', async () => {
+    localStorage.clear()
+    const { api, impl } = apiMock()
+    impl.planUsage = vi.fn(async (engine: string) => planFor(engine))
+    impl.usage = vi.fn(async (engine: string) => reportFor(engine))
+    vi.doMock('../../src/lib/api.ts', () => ({ api }))
+    const { UsageTab } = await import('../../src/components/Tabs.tsx')
+    const { unmount } = render(<UsageTab />)
+    await waitFor(() => expect(screen.getByText('Max (20x)')).toBeTruthy())
+    expect(impl.usage).toHaveBeenCalledWith('claude')
+    expect(screen.getByRole('tab', { name: 'Claude' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByText('Learn more about usage limits')).toBeTruthy()
+    // A session's totals span the engines it ran on: the session table is the same on both sides.
+    expect(screen.getByText('by claude')).toBeTruthy(); expect(screen.getByText('by codex')).toBeTruthy()
+    expect(screen.getByText(/every Claude Code message/)).toBeTruthy()
+    expect(screen.getAllByText(/3 messages ·/)).toHaveLength(3); expect(screen.getAllByText('Messages').length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Codex' }))
+    expect(screen.getByText('Asking Codex…')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('Plus')).toBeTruthy())
+    expect(impl.planUsage).toHaveBeenLastCalledWith('codex'); expect(impl.usage).toHaveBeenLastCalledWith('codex')
+    expect(screen.getByText(/as of .*when Codex last ran here/)).toBeTruthy()
+    expect(screen.queryByText('Learn more about usage limits')).toBeNull()
+    expect(screen.getByText('by codex')).toBeTruthy(); expect(screen.getByText('by claude')).toBeTruthy()
+    // Every five-hour window Codex reported is shown, not only the first.
+    expect(screen.getByText('Current session')).toBeTruthy(); expect(screen.getByText('Spark')).toBeTruthy()
+    expect(screen.getByText('every Codex model')).toBeTruthy(); expect(screen.getByText('codex-model')).toBeTruthy()
+    expect(screen.getByText(/every Codex request/)).toBeTruthy()
+    // What Codex's logs count is requests, several to a turn: the tables say so.
+    expect(screen.getAllByText(/3 requests ·/)).toHaveLength(3); expect(screen.getAllByText('Requests').length).toBeGreaterThan(0); expect(screen.queryByText('Messages')).toBeNull()
+    expect(screen.getByText('No requests in the current window.')).toBeTruthy()
+
+    unmount()
+    render(<UsageTab />)
+    expect(screen.getByRole('tab', { name: 'Codex' }).getAttribute('aria-selected')).toBe('true')
+    await waitFor(() => expect(screen.getByText('Plus')).toBeTruthy())
+  })
+
+  it('drops an answer for the engine that is no longer showing, and works without storage', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('private mode') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('private mode') })
+    const { api, impl } = apiMock()
+    let answerClaude: (value: unknown) => void = () => {}
+    impl.planUsage = vi.fn((engine: string) => (engine === 'claude'
+      ? new Promise((resolve) => { answerClaude = resolve }) : Promise.resolve(planFor(engine))))
+    impl.usage = vi.fn(async (engine: string) => reportFor(engine))
+    vi.doMock('../../src/lib/api.ts', () => ({ api }))
+    const { UsageTab } = await import('../../src/components/Tabs.tsx')
+    render(<UsageTab />)
+    expect(getItem).toHaveBeenCalled()
+    expect(screen.getByRole('tab', { name: 'Claude' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.click(screen.getByRole('tab', { name: 'Codex' }))
+    await waitFor(() => expect(screen.getByText('Plus')).toBeTruthy())
+    await act(async () => { answerClaude(planFor('claude')) })
+    expect(screen.getByText('Plus')).toBeTruthy(); expect(screen.queryByText('Max (20x)')).toBeNull()
+  })
+})
+
 describe('PullRequestsTab and GitHubTab', () => {
   it('shows buttons per rule, reviews, opens worktrees, autofixes, refreshes and degrades', async () => {
     const { api, impl } = apiMock()

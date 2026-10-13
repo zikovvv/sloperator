@@ -15,7 +15,8 @@ describe('where Claude Code brings its prompts', () => {
       const args = claudeArgs(session(mode), 'hi', null, 'new', host)
       expect(JSON.parse(args[args.indexOf('--mcp-config') + 1])).toEqual({ mcpServers: { orchestrator: { type: 'http', url: host } } })
       const allowed = args.indexOf('--allowedTools')
-      expect(args[allowed + 1]).toBe('mcp__orchestrator__rename_session')
+      expect(args[allowed + 1].split(',')).toEqual(['rename_session', 'list_workspace', 'update_session', 'update_worktree',
+        'create_session', 'create_worktree', 'manage_folder', 'manage_stack'].map((tool) => `mcp__orchestrator__${tool}`))
       // Both flags take lists: an option must follow, or the prompt would be read as one more entry.
       expect(args[allowed + 2]).toMatch(/^--/)
       expect(args.at(-1)).toBe('hi')   // the prompt stays last, where the engine reads it

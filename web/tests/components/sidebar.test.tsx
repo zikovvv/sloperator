@@ -97,9 +97,16 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Restore' })[1])
     fireEvent.click(screen.getByRole('button', { name: 'Remove empty group' }))
     fireEvent.click(screen.getAllByRole('button', { name: 'New session' })[0])
+    // Add project: the folder browser, cancelled once, then a folder picked.
+    impl.folders = vi.fn(async () => ({ path: '/somewhere', parent: '/', isGit: true, folders: [], more: 0 }))
     fireEvent.click(screen.getByRole('button', { name: '+ Add project' }))
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: '/somewhere' } }); fireEvent.click(screen.getByRole('button', { name: 'OK' }))
-    await waitFor(() => expect(calls.some(([name]) => name === 'addProject')).toBe(true))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Add project' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }))
+    await waitFor(() => expect((screen.getByLabelText('Folder path') as HTMLInputElement).value).toBe('/somewhere'))
+    fireEvent.click(screen.getByRole('button', { name: 'Add this folder' }))
+    await waitFor(() => expect(calls).toContainEqual(['addProject', ['/somewhere']]))
+    expect(screen.queryByRole('dialog', { name: 'Add project' })).toBeNull()
     // Drag a worktree onto a folder; drag a folder onto another.
     const grip = screen.getAllByTitle(/Drag onto a folder/)[0]
     const folderHeader = folderButton('review').parentElement!.parentElement!

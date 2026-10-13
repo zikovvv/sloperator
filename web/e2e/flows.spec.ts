@@ -106,6 +106,30 @@ test('Usage: plan limits from the API, extra usage, and the local spend sections
   await expect(page.getByText('Rates used')).toBeVisible()
 })
 
+test('Usage: the Codex side shows its plan limits and spend the way the Claude side does, and is remembered', async ({ page }) => {
+  await open(page)
+  await page.getByRole('tab', { name: 'Usage' }).click()
+  await expect(page.getByText('Max (20x)')).toBeVisible({ timeout: 30_000 })
+  const limits = page.waitForResponse((response) => response.url().endsWith('/api/plan-usage?engine=codex'))
+  const spend = page.waitForResponse((response) => response.url().endsWith('/api/usage?engine=codex'))
+  await page.getByRole('tab', { name: 'Codex' }).click()
+  expect((await limits).status()).toBe(200); expect((await spend).status()).toBe(200)
+  await expect(page.getByText('Plan usage limits')).toBeVisible()
+  await expect(page.getByText('Plus', { exact: true })).toBeVisible()
+  await expect(page.getByText(/as of .* when Codex last ran here/)).toBeVisible()
+  await expect(page.getByText('Current session')).toBeVisible(); await expect(page.getByText('21% used')).toBeVisible()
+  await expect(page.getByText('Weekly limits')).toBeVisible(); await expect(page.getByText('64% used')).toBeVisible()
+  await expect(page.getByText('Max (20x)')).toBeHidden()
+  // One request: 2M input of which 1M was cached, 1M output.
+  await expect(page.getByRole('row').filter({ hasText: 'gpt-e2e' }).first()).toContainText(/1\s*1\.0M\s*1\.0M\s*0\s*1\.0M/)
+  await expect(page.getByRole('cell', { name: '/work/e2e-codex-project' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: 'every Codex model' })).toBeVisible()
+  await page.reload()
+  await page.getByRole('tab', { name: 'Usage' }).click()
+  await expect(page.getByRole('tab', { name: 'Codex' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByText('Plus', { exact: true })).toBeVisible()
+})
+
 test('Settings: worktree root and both pricing tables edit and persist', async ({ page }) => {
   await open(page)
   await page.getByRole('button', { name: 'Settings' }).click()
@@ -252,8 +276,8 @@ test('sidebar: drag a worktree onto a folder moves it; drag a folder reorders; a
 test('toasts and notices: a failed action shows a dismissible toast; a server notice raises a toast event', async ({ page }) => {
   await open(page)
   await page.getByRole('button', { name: '+ Add project' }).click()
-  await page.getByRole('dialog', { name: 'Add project' }).getByRole('textbox').fill('/definitely/not/here')
-  await page.getByRole('dialog', { name: 'Add project' }).getByRole('button', { name: 'OK' }).click()
+  await page.getByRole('dialog', { name: 'Add project' }).getByLabel('Folder path').fill('/definitely/not/here')
+  await page.getByRole('dialog', { name: 'Add project' }).getByRole('button', { name: 'Add this folder' }).click()
   const toast = page.getByRole('status')
   await expect(toast).toContainText(/No such folder/)
   await toast.getByRole('button', { name: 'Dismiss' }).click()

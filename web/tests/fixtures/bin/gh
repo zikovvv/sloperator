@@ -5,10 +5,43 @@ case "$FAKE_GH_MODE" in
   unauth) echo "gh: not logged in" >&2; exit 1 ;;
 esac
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then echo "octo"; exit 0; fi
+# Stacks: pull requests opened here are remembered in FAKE_GH_STATE (one file per head branch), and
+# every call is appended to FAKE_GH_LOG, so a test can see what was asked of GitHub.
+[ -n "$FAKE_GH_LOG" ] && printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = "pr" ] && [ "$2" = "list" ] && [ "$3" = "--head" ]; then
+  file="$FAKE_GH_STATE/$(printf '%s' "$4" | tr '/' '_')"
+  if [ -n "$FAKE_GH_STATE" ] && [ -f "$file" ]; then cat "$file"; else echo '[]'; fi
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  [ "$FAKE_GH_MODE" = "create-fail" ] && { echo "gh: a pull request for this branch already exists" >&2; exit 1; }
+  head=""; prev=""; for a in "$@"; do [ "$prev" = "--head" ] && head="$a"; prev="$a"; done
+  count=$(ls "$FAKE_GH_STATE" 2>/dev/null | wc -l | tr -d ' '); number=$((40 + count))
+  printf '[{"number":%s,"url":"https://example.com/pr/%s"}]' "$number" "$number" > "$FAKE_GH_STATE/$(printf '%s' "$head" | tr '/' '_')"
+  echo "https://example.com/pr/$number"
+  exit 0
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ] && [[ "$*" == *squashMergeAllowed* ]]; then
+  case "$FAKE_GH_MODE" in
+    merge-only) echo '{"squashMergeAllowed":false,"mergeCommitAllowed":true,"rebaseMergeAllowed":false}' ;;
+    rebase-only) echo '{"squashMergeAllowed":false,"mergeCommitAllowed":false,"rebaseMergeAllowed":true}' ;;
+    *) echo '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}' ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  [ "$FAKE_GH_MODE" = "merge-fail" ] && { echo "gh: Pull request is not mergeable: the base branch policy prohibits the merge" >&2; exit 1; }
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  [ "$FAKE_GH_MODE" = "edit-fail" ] && { echo "gh: could not change the base branch" >&2; exit 1; }
+  exit 0
+fi
 # The branch a pull request was opened against: #9 is stacked on feature/one, #0 has no such thing.
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   case "$3" in
     9) echo '{"baseRefName":"feature/one"}' ;;
+    11) echo '{"baseRefName":"broken"}' ;;
     0) echo '{}' ;;
     *) echo '{"baseRefName":"main"}' ;;
   esac

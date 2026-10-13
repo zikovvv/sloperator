@@ -103,9 +103,13 @@ describe('worktrees', () => {
     expect(body.error).toMatch(/does not exist|invalid reference|fatal/i)
   })
   it('renames, pins, archives; ignores unknown fields', async () => {
-    const { body } = await json(await h.patch(`/api/worktree/${worktreeID}`, { name: 'renamed', isPinned: true, path: '/hack', isMain: true }))
+    const { body } = await json(await h.patch(`/api/worktree/${worktreeID}`, { name: 'renamed', isPinned: true, isMain: true, id: 'hack' }))
     expect(body.worktree.name).toBe('renamed'); expect(body.worktree.isPinned).toBe(true)
-    expect(body.worktree.path).toBe(worktreePath); expect(body.worktree.isMain).toBe(false)
+    expect(body.worktree.path).toBe(worktreePath); expect(body.worktree.isMain).toBe(false); expect(body.worktree.id).toBe(worktreeID)
+    // A path that is not a checkout of this repository refuses the whole patch.
+    expect((await h.patch(`/api/worktree/${worktreeID}`, { name: 'half applied', path: '/hack' })).status).toBe(400)
+    expect((await json(await h.get('/api/state'))).body.worktrees.find((entry: any) => entry.id === worktreeID))
+      .toMatchObject({ name: 'renamed', path: worktreePath })
     expect((await h.patch('/api/worktree/nope', {})).status).toBe(404)
     // The project's own checkout can never be archived, whoever asks.
     const refused = await json(await h.patch(`/api/worktree/${mainWorktreeID}`, { isArchived: true }))
@@ -166,8 +170,12 @@ describe('sessions', () => {
     sessionID = created.body.id
     expect(created.body.title).toBe('New session')
     expect((await h.post('/api/worktree/nope/session', {})).status).toBe(404)
-    const patched = await json(await h.patch(`/api/session/${sessionID}`, { engine: 'codex', id: 'hack', worktreeID: 'hack' }))
+    const patched = await json(await h.patch(`/api/session/${sessionID}`, { engine: 'codex', id: 'hack' }))
     expect(patched.body.engine).toBe('codex'); expect(patched.body.id).toBe(sessionID); expect(patched.body.worktreeID).toBe(mainWorktreeID)
+    // A worktree that does not exist refuses the whole patch: nothing else in it lands either.
+    expect((await h.patch(`/api/session/${sessionID}`, { title: 'half applied', worktreeID: 'hack' })).status).toBe(404)
+    expect((await json(await h.get('/api/state'))).body.sessions.find((entry: any) => entry.id === sessionID))
+      .toMatchObject({ title: 'New session', worktreeID: mainWorktreeID })
     expect((await h.patch('/api/session/nope', {})).status).toBe(404)
   })
   it('stores and returns a draft', async () => {

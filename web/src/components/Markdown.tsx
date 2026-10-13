@@ -233,7 +233,9 @@ export function Markdown({ text, onOpenFile, resolveImage }: {
 }) {
   const blocks = useMemo(() => parseBlocks(expandWikiLinks(text)), [text])
   return (
-    <div className="space-y-2 leading-relaxed">
+    // A line with nowhere to break (a URL, a quoted command) wraps anyway instead of pushing out of what holds it;
+    // break-words, not "anywhere", so a wide table still scrolls rather than cutting its words.
+    <div className="min-w-0 space-y-2 break-words leading-relaxed">
       {blocks.map((block, index) => {
         switch (block.kind) {
           case 'heading': {

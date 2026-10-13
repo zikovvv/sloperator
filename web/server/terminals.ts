@@ -14,7 +14,8 @@ const SCROLLBACK_LIMIT = 200_000
 const terminals = new Map<string, TerminalHandle>()
 
 /** Terminals belong to a worktree, not a session: the shell is about the checkout. */
-export function openTerminal(worktreeID: string, cwd: string, title: string): TerminalHandle {
+/** A shell in the worktree; `command`, when given, is typed into it as if by the person. */
+export function openTerminal(worktreeID: string, cwd: string, title: string, command?: string): TerminalHandle {
   const shell = process.env.SHELL || '/bin/zsh'
   // An empty LC_* makes every shell start with "cannot change locale" warnings.
   const env: Record<string, string> = {}
@@ -29,6 +30,7 @@ export function openTerminal(worktreeID: string, cwd: string, title: string): Te
   })
   child.onExit(() => terminals.delete(handle.id))
   terminals.set(handle.id, handle)
+  if (command) child.write(`${command}\r`)
   return handle
 }
 

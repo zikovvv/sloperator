@@ -24,6 +24,7 @@ const everything = { files: [
 let mounted: any = null
 let fileMounted: any = null
 let diffOptions: any = null
+let diffProps: any = null
 const sideEditors = { original: { updateOptions: vi.fn() }, modified: { updateOptions: vi.fn() } }
 const providers: Record<string, any> = {}
 const wiring = { registerDefinitionProvider: vi.fn((_l: string, p: any) => { providers.definition = p }),
@@ -35,8 +36,8 @@ beforeEach(() => {
   vi.resetModules(); localStorage.clear(); mounted = null; fileMounted = null; diffOptions = null
   sideEditors.original.updateOptions.mockClear(); sideEditors.modified.updateOptions.mockClear()
   vi.doMock('@monaco-editor/react', () => ({
-    DiffEditor: ({ onMount, beforeMount, options }: any) => {
-      beforeMount?.({ languages: wiring }); diffOptions = options
+    DiffEditor: ({ onMount, beforeMount, options, original, modified }: any) => {
+      beforeMount?.({ languages: wiring }); diffOptions = options; diffProps = { original, modified }
       // Tests hand in the modified editor they need; both sides also take the gutter options.
       mounted = (stub: any) => onMount({ ...stub,
         getOriginalEditor: () => Object.assign(stub.getOriginalEditor?.() ?? {}, { updateOptions: sideEditors.original.updateOptions }),
@@ -52,6 +53,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const mount = async (impl: Record<string, any> = {}, props: Record<string, any> = {}) => {
   const api = {
     diff: vi.fn(async () => diff), commits: vi.fn(async () => ({ commits: [{ sha: 'abc123', shortSHA: 'abc', subject: 'first' }] })),
+    diffFile: vi.fn(async () => ({ before: 'line 1\nline 2 old\nline 3', after: 'line 1\nline 2 new\nline 3' })),
     tree: vi.fn(async () => everything), file: vi.fn(async ({}: any) => ({ text: 'def x(): pass' })),
     definition: vi.fn(async () => ({ locations: [], error: null })), references: vi.fn(async () => ({ locations: [], error: null })),
     hover: vi.fn(async () => ({ text: null, error: null })),
@@ -93,10 +95,9 @@ describe('the review panel', () => {
   })
 
   it('a main checkout reviews its uncommitted edits, and the stored state comes back after a remount', async () => {
-    localStorage.setItem('orchestrator.review.w2', JSON.stringify({ scope: 'staged', commitSHA: null, context: 10, selected: 'src/b.py', mode: 'diff', treeMode: 'changed', panelOpen: true, viewing: null, history: [], folds: [] }))
+    localStorage.setItem('orchestrator.review.w2', JSON.stringify({ scope: 'staged', commitSHA: null, selected: 'src/b.py', mode: 'diff', treeMode: 'changed', panelOpen: true, viewing: null, history: [], folds: [] }))
     const { api } = await mount({}, { worktreeID: 'w2', isMain: true })
     expect(api.diff.mock.calls[0][1]).toBe('staged')
-    expect(api.diff.mock.calls[0][3]).toBe(10)
     expect(screen.getByTestId('review-sidebar')).toBeTruthy()
     expect((screen.getByLabelText('What to compare') as HTMLSelectElement).value).toBe('staged')
     cleanup(); vi.resetModules()
@@ -105,15 +106,15 @@ describe('the review panel', () => {
     expect(fresh.api.diff.mock.calls[0][1]).toBe('uncommitted')
   })
 
-  it('switches scope, commit and context from the sidebar, and refreshes', async () => {
+  it('switches scope and commit from the sidebar, and refreshes', async () => {
     const { api } = await mount()
     openSidebar()
     fireEvent.change(screen.getByLabelText('What to compare'), { target: { value: 'sha:abc123' } })
     await waitFor(() => expect(api.diff).toHaveBeenLastCalledWith('/w', 'commit', 'main', 3, 'abc123', undefined))
     expect(screen.getAllByText('first').length).toBeGreaterThan(0)
     fireEvent.change(screen.getByLabelText('What to compare'), { target: { value: 'uncommitted' } })
-    fireEvent.change(screen.getByLabelText('Context lines'), { target: { value: '200' } })
-    await waitFor(() => expect(api.diff).toHaveBeenLastCalledWith('/w', 'uncommitted', 'main', 200, undefined, undefined))
+    // The editor shows the whole file on both sides, fetched for the file on screen.
+    await waitFor(() => expect(api.diffFile).toHaveBeenLastCalledWith('/w', 'uncommitted', 'main', 'src/deep/a.py', undefined))
     const calls = api.diff.mock.calls.length
     fireEvent.click(screen.getByRole('button', { name: 'Refresh diff' }))
     await waitFor(() => expect(api.diff.mock.calls.length).toBe(calls + 1))
@@ -165,31 +166,22 @@ describe('the review panel', () => {
     expect(screen.getByText(/F12 definition/)).toBeTruthy()
   })
 
-  it('asks the language server about the file line behind a diff row, and brings its answer back to the row', async () => {
-    const withDeletion = { files: [{ path: 'src/deep/a.py', status: 'M', added: 1, removed: 1, isBinary: false, hunks: [{ id: 1, header: '@@', lines: [
-      { id: 1, kind: 'hunkHeader', text: '@@', oldLine: null, newLine: null },
-      { id: 2, kind: 'context', text: 'a', oldLine: 40, newLine: 40 },
-      { id: 3, kind: 'deletion', text: 'b', oldLine: 41, newLine: null },
-      { id: 4, kind: 'addition', text: 'c', oldLine: null, newLine: 41 },
-    ] }] }] }
-    const { api } = await mount({ diff: vi.fn(async () => withDeletion),
-      definition: vi.fn(async () => ({ locations: [{ path: '/w/src/deep/a.py', line: 41, character: 2 }], error: null })) })
+  it('asks the language server by file line, which a whole-file diff row is, and brings its answer back to that row', async () => {
+    const { api } = await mount({ definition: vi.fn(async () => ({ locations: [{ path: '/w/src/deep/a.py', line: 41, character: 2 }], error: null })) })
     await waitFor(() => expect(providers.definition).toBeTruthy())
     const model = { uri: 'file:///w/src/deep/a.py' }
-    // Row 1 is the context line, 40 in the file; the deletion has no row; row 2 is the added line 41.
-    const found = await providers.definition.provideDefinition(model, { lineNumber: 1, column: 1 })
+    const found = await providers.definition.provideDefinition(model, { lineNumber: 40, column: 1 })
     expect(api.definition).toHaveBeenLastCalledWith('/w', '/w/src/deep/a.py', 39, 0)
-    expect(found).toEqual([{ uri: model.uri, range: { startLineNumber: 2, startColumn: 3, endLineNumber: 2, endColumn: 3 } }])
+    expect(found).toEqual([{ uri: model.uri, range: { startLineNumber: 41, startColumn: 3, endLineNumber: 41, endColumn: 3 } }])
     await providers.hover.provideHover(model, { lineNumber: 2, column: 1 })
-    expect(api.hover).toHaveBeenLastCalledWith('/w', '/w/src/deep/a.py', 40, 0)
-    // A definition on a line the diff does not show opens the file there.
-    api.definition.mockResolvedValueOnce({ locations: [{ path: '/w/src/deep/a.py', line: 7, character: 0 }], error: null })
+    expect(api.hover).toHaveBeenLastCalledWith('/w', '/w/src/deep/a.py', 1, 0)
+    // A definition in another file opens that file there.
+    api.definition.mockResolvedValueOnce({ locations: [{ path: '/w/src/other.py', line: 7, character: 0 }], error: null })
     expect(await providers.definition.provideDefinition(model, { lineNumber: 2, column: 1 })).toEqual([])
     await waitFor(() => expect(screen.getByTestId('file')).toBeTruthy())
-    expect(screen.getByText('src/deep/a.py:7')).toBeTruthy()
-    // In a file, rows are lines.
+    expect(screen.getByText('src/other.py:7')).toBeTruthy()
     await providers.definition.provideDefinition(model, { lineNumber: 7, column: 1 })
-    expect(api.definition).toHaveBeenLastCalledWith('/w', '/w/src/deep/a.py', 6, 0)
+    expect(api.definition).toHaveBeenLastCalledWith('/w', '/w/src/other.py', 6, 0)
   })
 
   it('opens what the chat asked for: a changed file in the diff, anything else as a file, once per request', async () => {
@@ -207,6 +199,44 @@ describe('the review panel', () => {
     expect(api.file).toHaveBeenCalledTimes(1)
   })
 
+  it('waits for the diff before deciding where a reference opens, so an early click still lands in the diff', async () => {
+    let answer: (value: any) => void = () => {}
+    const { ReviewPanel } = await (async () => { await mount({ diff: vi.fn(() => new Promise((resolve) => { answer = resolve })) }); return import('../../src/components/ReviewPanel.tsx') })()
+    cleanup()
+    const props = { worktreeID: 'w1', worktreePath: '/w', baseBranch: 'main', isMain: false, generation: 1, onAddComment: vi.fn(), onQuote: vi.fn() }
+    render(<ReviewPanel {...props} open={{ path: '/w/src/b.py', line: 2, nonce: 5 }} />)   // clicked before the diff answered
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.queryByTestId('file')).toBeNull()
+    await act(async () => { answer(diff) })
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('orchestrator.review.w1')!).selected).toBe('src/b.py'))
+    expect(JSON.parse(localStorage.getItem('orchestrator.review.w1')!).mode).toBe('diff')
+    expect(screen.queryByTestId('file')).toBeNull()
+  })
+
+  it('opens a changed file the chat named in the diff on screen, at its line, however the path was written', async () => {
+    const { rerender } = await mount()
+    const { ReviewPanel } = await import('../../src/components/ReviewPanel.tsx')
+    const props = { worktreeID: 'w1', worktreePath: '/w', baseBranch: 'main', isMain: false, generation: 1, onAddComment: vi.fn(), onQuote: vi.fn() }
+    const modified = { onDidChangeCursorSelection: vi.fn(), addAction: vi.fn(), addCommand: vi.fn(), onMouseDown: vi.fn(), revealLineInCenter: vi.fn(), setPosition: vi.fn() }
+    await waitFor(() => expect(mounted).toBeTruthy())
+    act(() => { mounted({ getModifiedEditor: () => modified }) })   // src/deep/a.py is on screen
+    // Already showing that file: the line comes into view at once. The path came from another checkout.
+    rerender(<ReviewPanel {...props} open={{ path: '/other-checkout/src/deep/a.py', line: 40, nonce: 1 }} />)
+    await waitFor(() => expect(modified.revealLineInCenter).toHaveBeenCalledWith(40))
+    expect(modified.setPosition).toHaveBeenCalledWith({ lineNumber: 40, column: 1 })
+    expect(screen.queryByTestId('file')).toBeNull()   // the diff, not the plain file
+    // Another changed file: the diff switches to it, and the line is shown once its editor mounts.
+    rerender(<ReviewPanel {...props} open={{ path: '/w/src/b.py', line: 3, nonce: 2 }} />)
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('orchestrator.review.w1')!).selected).toBe('src/b.py'))
+    const next = { ...modified, revealLineInCenter: vi.fn(), setPosition: vi.fn() }
+    act(() => { mounted({ getModifiedEditor: () => next }) })
+    expect(next.revealLineInCenter).toHaveBeenCalledWith(3)
+    // No line: just that file's diff, and nothing is scrolled.
+    rerender(<ReviewPanel {...props} open={{ path: 'test_a.py', nonce: 3 }} />)
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('orchestrator.review.w1')!).selected).toBe('tests/test_a.py'))
+    expect(next.revealLineInCenter).toHaveBeenCalledTimes(1)
+  })
+
   it('quotes a selection and comments from the line numbers, in the diff and in a file', async () => {
     const { onQuote, onAddComment } = await mount()
     await waitFor(() => expect(mounted).toBeTruthy())
@@ -217,7 +247,7 @@ describe('the review panel', () => {
     act(() => { mounted({ getModifiedEditor: () => modified }) })
     act(() => { listeners.sel({ selection: { startLineNumber: 2, endLineNumber: 2 } }) })
     fireEvent.click(screen.getByRole('button', { name: /Quote → chat/ }))
-    expect(onQuote).toHaveBeenCalledWith(expect.stringContaining('src/deep/a.py:11'))
+    expect(onQuote).toHaveBeenCalledWith(expect.stringContaining('src/deep/a.py:2'))   // a row of the whole file is that line
     act(() => { command() }); expect(onQuote).toHaveBeenCalledTimes(2)
     model.getValueInRange = () => '  '
     act(() => { listeners.sel({ selection: { startLineNumber: 1, endLineNumber: 1 } }) }); act(() => { command() })
@@ -229,7 +259,7 @@ describe('the review panel', () => {
     fireEvent.change(box, { target: { value: 'hmm' } })
     fireEvent.keyDown(box, { key: 'Enter', shiftKey: true })   // newline, not send
     fireEvent.keyDown(box, { key: 'Enter' })
-    expect(onAddComment).toHaveBeenCalledWith(expect.objectContaining({ file: 'src/deep/a.py', line: 11, body: 'hmm', snippet: 'line text' }))
+    expect(onAddComment).toHaveBeenCalledWith(expect.objectContaining({ file: 'src/deep/a.py', line: 2, body: 'hmm', snippet: 'line text' }))
     act(() => { listeners.mouse({ target: { type: 3, position: { lineNumber: 1 } } }) })
     fireEvent.keyDown(screen.getByPlaceholderText('What about this line?'), { key: 'Escape' })
     expect(screen.queryByPlaceholderText('What about this line?')).toBeNull()
@@ -336,7 +366,7 @@ describe('the review panel', () => {
       { path: 'gone.py', status: 'D', added: 0, removed: 4, isBinary: false, hunks: [] },
       { path: 'new.py', status: 'A', added: 2, removed: 0, isBinary: false, hunks: [] },
     ] }
-    localStorage.setItem('orchestrator.review.w9', JSON.stringify({ scope: 'commit', commitSHA: 'zzz', context: 3, selected: null, mode: 'diff', treeMode: 'changed', panelOpen: true, viewing: null, history: [], folds: ['§tests'] }))
+    localStorage.setItem('orchestrator.review.w9', JSON.stringify({ scope: 'commit', commitSHA: 'zzz', selected: null, mode: 'diff', treeMode: 'changed', panelOpen: true, viewing: null, history: [], folds: ['§tests'] }))
     await mount({ diff: vi.fn(async () => withStatuses), commits: vi.fn(async () => ({})) }, { worktreeID: 'w9' })
     await waitFor(() => expect(screen.getAllByTestId('tree-file')).toHaveLength(2))
     const [gone, added] = screen.getAllByTestId('tree-file')
@@ -395,7 +425,7 @@ describe('walking the file trail', () => {
 
   it('survives a stored state saved before Forward existed', async () => {
     localStorage.setItem('orchestrator.review.w1', JSON.stringify({
-      scope: 'branch', commitSHA: null, context: 3, selected: null, mode: 'diff', treeMode: 'changed',
+      scope: 'branch', commitSHA: null, selected: null, mode: 'diff', treeMode: 'changed',
       panelOpen: false, viewing: null, history: [], folds: ['§tests'],   // no `future` key at all
     }))
     await mount()
@@ -504,9 +534,9 @@ describe('commenting on a line of the pull request', () => {
     fireEvent.change(box, { target: { value: 'this is wrong' } })
     fireEvent.click(screen.getByRole('button', { name: 'Comment on PR' }))
     await waitFor(() => expect(postLineComment).toHaveBeenCalledWith(expect.objectContaining({
-      path: '/w', prNumber: 7, commitSHA: 'deadbee', file: 'src/deep/a.py', line: 11, body: 'this is wrong',
+      path: '/w', prNumber: 7, commitSHA: 'deadbee', file: 'src/deep/a.py', line: 2, body: 'this is wrong',
     })))
-    await waitFor(() => expect(screen.getByText(/Posted on src\/deep\/a\.py:11/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/Posted on src\/deep\/a\.py:2/)).toBeTruthy())
     expect(screen.queryByPlaceholderText('What about this line?')).toBeNull()
     expect(api.conversations).toHaveBeenCalledTimes(2)   // refreshed, so the new comment shows
   })
@@ -847,6 +877,7 @@ describe('long lines and the gutter', () => {
     await mount()
     await waitFor(() => expect(diffOptions).toBeTruthy())
     expect(diffOptions).toMatchObject({ wordWrap: 'off', diffWordWrap: 'off', lineDecorationsWidth: 18 })
+    expect(diffProps).toEqual({ original: 'line 1\nline 2 old\nline 3', modified: 'line 1\nline 2 new\nline 3' })
     const toggle = () => screen.getByRole('button', { name: 'Wrap long lines' })
     fireEvent.click(toggle())
     await waitFor(() => expect(diffOptions).toMatchObject({ wordWrap: 'on', diffWordWrap: 'on' }))
@@ -861,15 +892,32 @@ describe('long lines and the gutter', () => {
     expect(toggle().getAttribute('aria-pressed')).toBe('false')
   })
 
-  it('numbers each side\'s rows by that side\'s file lines, in a gutter as wide as the largest number', async () => {
-    await mount()
-    await waitFor(() => expect(mounted).toBeTruthy())
-    act(() => { mounted({ getModifiedEditor: () => ({ onDidChangeCursorSelection: vi.fn(), addAction: vi.fn(), addCommand: vi.fn(), onMouseDown: vi.fn() }) }) })
-    const numbering = (side: { updateOptions: ReturnType<typeof vi.fn> }) => side.updateOptions.mock.calls.at(-1)![0].lineNumbers as (row: number) => string
-    // The fixture hunk keeps line 10, deletes old line 11 and adds new line 11.
-    expect([1, 2, 3].map(numbering(sideEditors.modified))).toEqual(['10', '11', ''])
-    expect([1, 2, 3].map(numbering(sideEditors.original))).toEqual(['10', '11', ''])
-    expect(diffOptions.lineNumbers).toBeUndefined()   // Monaco would copy it onto both sides
-    expect(diffOptions.lineNumbersMinChars).toBe(3)
+  it('shows the whole file on both sides, empty where the file does not exist, and keeps a stale answer off the screen', async () => {
+    const answers: Record<string, () => void> = {}
+    const { api } = await mount({ diffFile: vi.fn((_p: string, _s: string, _b: string | null, path: string) =>
+      new Promise((resolve) => { answers[path] = () => resolve(path === 'src/b.py' ? { before: null, after: 'new file' } : { before: 'old', after: 'new' }) })) })
+    expect(screen.queryByTestId('diff')).toBeNull()   // nothing to show until the sides arrive
+    openSidebar()
+    fireEvent.click(screen.getByText('b.py'))          // switched before a.py answered
+    await waitFor(() => expect(api.diffFile).toHaveBeenCalledTimes(2))
+    answers['src/b.py'](); await waitFor(() => expect(mounted).toBeTruthy())
+    expect(diffProps).toMatchObject({ original: '', modified: 'new file' })
+    answers['src/deep/a.py'](); await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(diffProps).toMatchObject({ original: '', modified: 'new file' })
+    cleanup(); vi.resetModules()
+    await mount({ diffFile: vi.fn(async () => ({ before: 'gone', after: null })) })   // deleted on this side
+    await waitFor(() => expect(diffProps).toEqual({ original: 'gone', modified: '' }))
+  })
+
+  it('reports a side that could not be read, unless the panel has moved on to another file', async () => {
+    const fail: Record<string, (error: Error) => void> = {}
+    await mount({ diffFile: vi.fn((_p: string, _s: string, _b: string | null, path: string) => new Promise((_resolve, reject) => { fail[path] = reject })) })
+    openSidebar()
+    fireEvent.click(screen.getByText('b.py'))
+    await waitFor(() => expect(fail['src/b.py']).toBeTruthy())
+    fail['src/deep/a.py'](new Error('stale failure')); await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.queryByText('stale failure')).toBeNull()
+    fail['src/b.py'](new Error('git show exploded'))
+    await waitFor(() => expect(screen.getByText('git show exploded')).toBeTruthy())
   })
 })

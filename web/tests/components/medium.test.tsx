@@ -18,6 +18,7 @@ describe('TasksTab', () => {
     let tasks: any = { tasks: [{
       sessionID: 's1', title: 'Job', engine: 'claude', worktree: 'main', pid: 42, startedAt: Date.now() - 3_700_000,
       tools: [{ id: 't1', name: 'Task', detail: 'sub', startedAt: Date.now() - 65_000 }, { id: 't2', name: 'Bash', detail: 'ls', startedAt: Date.now() - 5000 }],
+      background: [{ id: 'b1', kind: 'command', description: 'run the whole suite', startedAt: Date.now() - 1000 }],
       finished: [],
       processes: [{ pid: 43, ppid: 42, command: 'bash', depth: 1, elapsed: 4, cpu: 1 }],
     }], terminals: [{ id: 'x', worktreeID: 'w', title: 'Terminal 1', pid: 9 }] }
@@ -38,7 +39,7 @@ describe('TasksTab', () => {
     await waitFor(() => expect(screen.getByText('refused')).toBeTruthy())
     expect(impl.killProcess).toHaveBeenCalledWith(43)
     fireEvent.click(screen.getByRole('button', { name: 'Close' })); expect(impl.closeTerminal).toHaveBeenCalledWith('x')
-    tasks = { tasks: [{ ...tasks.tasks[0], tools: [], processes: [] }], terminals: [] }
+    tasks = { tasks: [{ ...tasks.tasks[0], tools: [], background: [], processes: [] }], terminals: [] }
     await waitFor(() => expect(screen.getByText(/Thinking — no tool call/)).toBeTruthy(), { timeout: 4000 })
     tasks = { tasks: [], terminals: [] }
     await waitFor(() => expect(screen.getByText(/No agent is running/)).toBeTruthy(), { timeout: 4000 })
@@ -83,6 +84,30 @@ describe('TerminalDrawer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New terminal' }))
     await waitFor(() => expect(screen.getByText('no shell')).toBeTruthy())
   })
+  it('opens a terminal running the engine\'s login when asked to sign in, and brings it to the front', async () => {
+    const terminals: any[] = [{ id: 't1', worktreeID: 'w', title: 'Terminal 1', pid: 1 }]
+    const { api, impl } = apiMock()
+    impl.terminals = vi.fn(async () => ({ terminals: [...terminals] }))
+    impl.openTerminal = vi.fn(async (_w: string, options: any) => {
+      if (options.login === 'codex') throw new Error('Could not find `codex` on PATH.')
+      const t = { id: 't2', worktreeID: 'w', title: 'Sign in to Claude', pid: 2 }; terminals.push(t); return t
+    })
+    vi.doMock('../../src/lib/api.ts', () => ({ api }))
+    vi.stubGlobal('WebSocket', class { static OPEN = 1; readyState = 1; send() {} close() {} })
+    vi.doMock('@xterm/xterm', () => ({ Terminal: class { loadAddon() {} open() {} write() {} onData() { return { dispose() {} } } onResize() { return { dispose() {} } } dispose() {} } }))
+    vi.doMock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} } }))
+    vi.doMock('@xterm/xterm/css/xterm.css', () => ({}))
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+    const { TerminalDrawer } = await import('../../src/components/TerminalDrawer.tsx')
+    const { rerender } = render(<TerminalDrawer worktreeID="w" worktreeName="main" onClose={vi.fn()} signIn={{ engine: 'claude', nonce: 1 }} />)
+    expect(impl.openTerminal).toHaveBeenCalledWith('w', { login: 'claude' })
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Sign in to Claude/ }).getAttribute('aria-selected')).toBe('true'))
+    rerender(<TerminalDrawer worktreeID="w" worktreeName="main" onClose={vi.fn()} signIn={{ engine: 'claude', nonce: 1 }} />)
+    expect(impl.openTerminal).toHaveBeenCalledTimes(1)   // the same request again opens nothing new
+    rerender(<TerminalDrawer worktreeID="w" worktreeName="main" onClose={vi.fn()} signIn={{ engine: 'codex', nonce: 2 }} />)
+    await waitFor(() => expect(screen.getByText('Could not find `codex` on PATH.')).toBeTruthy())
+  })
+
   it('reports a listing failure', async () => {
     const { api, impl } = apiMock()
     impl.terminals = vi.fn(async () => { throw new Error('listing failed') })

@@ -1,14 +1,15 @@
 import { readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+/** Stops the server and Vite, then removes the run's folder: state, repositories and every temp file made in it. */
 export default async function globalTeardown() {
+  const runDir = process.env.E2E_RUN_DIR
+  if (!runDir) return
   try {
-    const info = JSON.parse(readFileSync(join(tmpdir(), 'orch-e2e.json'), 'utf8'))
+    const info = JSON.parse(readFileSync(join(runDir, 'orch-e2e.json'), 'utf8'))
     for (const pid of [info.uiPid, info.serverPid]) { try { process.kill(pid, 'SIGTERM') } catch { /* gone */ } }
     await new Promise((resolve) => setTimeout(resolve, 1500))
     for (const pid of [info.uiPid, info.serverPid]) { try { process.kill(pid, 'SIGKILL') } catch { /* gone */ } }
-    rmSync(info.stateDir, { recursive: true, force: true })
-    rmSync(info.repo, { recursive: true, force: true })
-  } catch { /* nothing to tear down */ }
+  } catch { /* nothing was started */ }
+  rmSync(runDir, { recursive: true, force: true })
 }

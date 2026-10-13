@@ -44,17 +44,20 @@ export interface UsageReport {
   scannedFiles: number
 }
 
-interface Event extends Tokens {
+export interface Event extends Tokens {
   timestamp: number
   model: string
   project: string
   key: string | null
 }
 
-interface CacheEntry { modified: number; size: number; events: Event[] }
+export interface CacheEntry<T> { modified: number; size: number; parsed: T }
 
 /** Re-parsing every transcript on a timer cost seconds of CPU, so memoise per file. */
-const cache = new Map<string, CacheEntry>()
+const cache = new Map<string, CacheEntry<Event[]>>()
+
+/** The rate for an engine whose models all cost the same. */
+export const ANY_MODEL = '*'
 
 export function shortModel(model: string): string {
   for (const name of ['fable', 'opus', 'sonnet', 'haiku']) {
@@ -64,7 +67,7 @@ export function shortModel(model: string): string {
 }
 
 export function costOf(tokens: Tokens, model: string, pricing: ClaudePricing): number {
-  const rates = pricing[shortModel(model)]
+  const rates = pricing[shortModel(model)] ?? pricing[ANY_MODEL]
   if (!rates) return 0
   return (tokens.input * rates.input + tokens.cacheRead * rates.cacheRead
     + tokens.cacheWrite * rates.cacheWrite + tokens.output * rates.output) / 1e6
@@ -88,7 +91,7 @@ function add(bucket: Bucket, event: Event, pricing: ClaudePricing) {
  * lossy, so the folder is shown minus the home prefix rather than guessed back into a path.
  */
 export function projectOf(path: string, home = homedir()): string {
-  const root = process.env.ORCHESTRATOR_CLAUDE_PROJECTS ?? join(home, '.claude/projects')
+  const root = projectsRoot(home)
   const relative = path.startsWith(root) ? path.slice(root.length + 1) : path
   const folder = relative.split('/').filter(Boolean)[0] ?? relative
   const homeEncoded = home.replace(/\//g, '-')
@@ -96,7 +99,7 @@ export function projectOf(path: string, home = homedir()): string {
   return trimmed.replace(/^-+/, '').replace(/^Projects-/, '') || folder
 }
 
-function parseFile(path: string, cutoff: number): Event[] {
+function parseFile(path: string): Event[] {
   let text: string
   try { text = readFileSync(path, 'utf8') } catch { return [] }
   const project = projectOf(path)
@@ -109,7 +112,7 @@ function parseFile(path: string, cutoff: number): Event[] {
     const usage = obj.message?.usage
     if (!usage) continue
     const timestamp = Date.parse(obj.timestamp ?? '')
-    if (!Number.isFinite(timestamp) || timestamp < cutoff) continue
+    if (!Number.isFinite(timestamp)) continue
     const model = obj.message?.model ?? 'unknown'
     if (model === '<synthetic>') continue
     const messageID = obj.message?.id ?? ''
@@ -128,8 +131,8 @@ function parseFile(path: string, cutoff: number): Event[] {
 }
 
 /** Where Claude Code keeps transcripts; tests point it at a throwaway tree. */
-function projectsRoot(): string {
-  return process.env.ORCHESTRATOR_CLAUDE_PROJECTS ?? join(homedir(), '.claude/projects')
+function projectsRoot(home = homedir()): string {
+  return process.env.ORCHESTRATOR_CLAUDE_PROJECTS ?? join(home, '.claude/projects')
 }
 
 interface Found { path: string; modified: number; size: number }
@@ -148,28 +151,32 @@ function walk(directory: string, out: Found[], depth = 0) {
   }
 }
 
-/** Every assistant message since `cutoff`, one per message even when logged as several lines. */
-export function collectEvents(cutoff: number): { events: Event[]; files: number } {
+/**
+ * Parses every transcript under `root` touched since `cutoff`, re-reading only the files that changed.
+ * A first scan reads gigabytes, so it steps aside after each file: running agents keep streaming.
+ */
+export async function scan<T>(root: string, cutoff: number, known: Map<string, CacheEntry<T>>, parse: (path: string) => T): Promise<T[]> {
   const files: Found[] = []
-  walk(projectsRoot(), files)
-
-  let events: Event[] = []
+  walk(root, files)
   const seenPaths = new Set<string>()
+  const parsed: T[] = []
   for (const { path, modified, size } of files) {
     if (modified < cutoff) continue
     seenPaths.add(path)
-    const hit = cache.get(path)
-    if (hit && hit.modified === modified && hit.size === size) {
-      events = events.concat(hit.events)
-      continue
+    let hit = known.get(path)
+    if (!hit || hit.modified !== modified || hit.size !== size) {
+      hit = { modified, size, parsed: parse(path) }
+      known.set(path, hit)
+      await new Promise((resolve) => setImmediate(resolve))
     }
-    const parsed = parseFile(path, cutoff)
-    cache.set(path, { modified, size, events: parsed })
-    events = events.concat(parsed)
+    parsed.push(hit.parsed)
   }
-  for (const key of cache.keys()) if (!seenPaths.has(key)) cache.delete(key)
+  for (const key of known.keys()) if (!seenPaths.has(key)) known.delete(key)
+  return parsed
+}
 
-  // Lines sharing a key describe ONE message and are merged, never summed.
+/** Lines sharing a key describe ONE message and are merged, never summed. */
+export function mergeEvents(events: Event[]): Event[] {
   const keyed = new Map<string, Event>()
   const unkeyed: Event[] = []
   for (const event of events) {
@@ -184,10 +191,14 @@ export function collectEvents(cutoff: number): { events: Event[]; files: number 
       output: Math.max(existing.output, event.output),
     } : event)
   }
-  return {
-    events: [...unkeyed, ...keyed.values()].sort((a, b) => a.timestamp - b.timestamp),
-    files: seenPaths.size,
-  }
+  return [...unkeyed, ...keyed.values()].sort((a, b) => a.timestamp - b.timestamp)
+}
+
+/** Every assistant message since `cutoff`, one per message even when logged as several lines. */
+export async function collectEvents(cutoff: number): Promise<{ events: Event[]; files: number }> {
+  const parsed = await scan(projectsRoot(), cutoff, cache, parseFile)
+  // A file is remembered whole: what has since left the window is cut here, not when it was read.
+  return { events: mergeEvents(parsed.flat().filter((event) => event.timestamp >= cutoff)), files: parsed.length }
 }
 
 export function blocksFrom(events: Event[], pricing: ClaudePricing, now = Date.now()): UsageBlock[] {
@@ -261,12 +272,7 @@ export function reportFrom(events: Event[], pricing: ClaudePricing, files: numbe
   }
 }
 
-export function usageReport(pricing: ClaudePricing = DEFAULT_CLAUDE_PRICING): UsageReport {
-  const { events, files } = collectEvents(Date.now() - 30 * 24 * 3600 * 1000)
+export async function usageReport(pricing: ClaudePricing): Promise<UsageReport> {
+  const { events, files } = await collectEvents(Date.now() - 30 * 24 * 3600 * 1000)
   return reportFrom(events, pricing, files)
-}
-
-/** Kept for callers that only want the 5-hour windows. */
-export function usageBlocks(): UsageBlock[] {
-  return usageReport().blocks
 }

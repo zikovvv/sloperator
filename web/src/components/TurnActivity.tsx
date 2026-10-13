@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { ActiveProcess, ActiveTool, AgentTranscript, FinishedTool } from '../../shared/types.ts'
+import type { ActiveProcess, ActiveTool, AgentTranscript, BackgroundTask, FinishedTool } from '../../shared/types.ts'
 import { duration, elapsed } from '../lib/elapsed.ts'
 import { CodeBlock } from './Markdown.tsx'
 import { describeInput } from './PermissionCard.tsx'
@@ -9,8 +9,8 @@ import { describeInput } from './PermissionCard.tsx'
  * agent with a kill switch, what already finished and what it printed, and the subagents' own
  * transcripts. Nothing here is cut short: a row opens to all of it.
  */
-export function TurnActivity({ tools, finished, processes, agents, running, startedAt, now, onKill }: {
-  tools: ActiveTool[]; finished: FinishedTool[]; processes: ActiveProcess[]; agents: AgentTranscript[]
+export function TurnActivity({ tools, background, finished, processes, agents, running, startedAt, now, onKill }: {
+  tools: ActiveTool[]; background: BackgroundTask[]; finished: FinishedTool[]; processes: ActiveProcess[]; agents: AgentTranscript[]
   running: boolean; startedAt: number | null; now: number; onKill: (pid: number) => void
 }) {
   return (
@@ -19,6 +19,17 @@ export function TurnActivity({ tools, finished, processes, agents, running, star
         <section>
           <div className="label mb-0.5">Running now</div>
           {tools.map((tool) => <ToolLine key={tool.id} tool={tool} now={now} />)}
+        </section>)}
+      {background.length > 0 && (
+        <section data-testid="background-tasks">
+          <div className="label mb-0.5">In the background ({background.length}) · the turn stays open until these end</div>
+          {background.map((task) => (
+            <div key={task.id} className="mb-0.5 flex items-baseline gap-2 rounded-md border border-ink-800/80 bg-ink-900/40 px-2 py-1">
+              <span className="dot-running h-1.5 w-1.5 shrink-0 self-center rounded-full bg-ok" />
+              <span className="font-mono text-[10px] text-ink-300">{task.kind === 'agent' ? 'subagent' : 'command'}</span>
+              <span className="min-w-0 flex-1 truncate text-ink-400" title={task.description}>{task.description}</span>
+              <span className="font-mono text-[10px] text-ink-500">{elapsed(task.startedAt, now)}</span>
+            </div>))}
         </section>)}
       {processes.length > 0 && (
         <section>

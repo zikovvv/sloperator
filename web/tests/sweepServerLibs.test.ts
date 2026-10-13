@@ -21,7 +21,7 @@ describe('git where there is no repository', () => {
 })
 
 describe('usage files', () => {
-  it('reads what a line lacks as unknown or zero, and steps over links that lead nowhere', () => {
+  it('reads what a line lacks as unknown or zero, and steps over links that lead nowhere', async () => {
     expect(projectOf(`${process.env.ORCHESTRATOR_CLAUDE_PROJECTS}/`, '/Users/jane')).toBe('')
     const root = process.env.ORCHESTRATOR_CLAUDE_PROJECTS!
     const project = join(root, '-w-sweep')
@@ -32,7 +32,7 @@ describe('usage files', () => {
       JSON.stringify({ type: 'assistant', timestamp: stamp, message: { model: 'claude-opus-5', id: 'm1', usage: { input_tokens: 3, output_tokens: 4 } } }),
     ].join('\n') + '\n')
     symlinkSync('/nowhere/ghost', join(project, 'ghost.jsonl'))
-    const { events } = collectEvents(Date.now() - 60_000)
+    const { events } = await collectEvents(Date.now() - 60_000)
     const thin = events.find((event) => event.project === 'w-sweep' && event.model === 'unknown')
     expect(thin).toMatchObject({ input: 0, output: 0, cacheRead: 5 })
     expect(events.some((event) => event.model === 'claude-opus-5' && event.input === 3)).toBe(true)

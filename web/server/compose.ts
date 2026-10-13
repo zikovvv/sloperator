@@ -51,5 +51,5 @@ export function bridgePrompt(items: TranscriptItem[], fromIndex: number, budget 
     rendered.unshift(line)
     used += line.length
   }
-  return `Context from this conversation so far, which you did not see because it ran on the other engine:\n\n${rendered.join('\n\n')}\n\n---\n`
+  return `Context from this conversation so far, which is not in your own history of it:\n\n${rendered.join('\n\n')}\n\n---\n`
 }

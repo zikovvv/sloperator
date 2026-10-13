@@ -6,7 +6,6 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { collectEvents } from '../server/usage.ts'
 import { createWorktree } from '../server/worktrees.ts'
-import { sidesOf } from '../src/lib/diffSides.ts'
 import { resetsOn } from '../src/lib/usageFormat.ts'
 import { encodeWav } from '../src/lib/wav.ts'
 import { api } from '../src/lib/api.ts'
@@ -15,7 +14,7 @@ import { makeRepo } from './helpers/server.ts'
 afterEach(() => { vi.unstubAllGlobals(); delete process.env.ORCHESTRATOR_CLAUDE_PROJECTS })
 
 describe('usage scanner leftovers', () => {
-  it('skips unreadable directories and files, lines without timestamps or usage, and reads without cache fields', () => {
+  it('skips unreadable directories and files, lines without timestamps or usage, and reads without cache fields', async () => {
     const root = mkdtempSync(join(tmpdir(), 'scan-'))
     process.env.ORCHESTRATOR_CLAUDE_PROJECTS = root
     mkdirSync(join(root, 'locked'), { mode: 0o000 })
@@ -27,7 +26,7 @@ describe('usage scanner leftovers', () => {
       JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { model: 'claude-sonnet-5' }, note: 'no usage block here at all' }),
     ].join('\n'))
     const unreadable = join(good, 'b.jsonl'); writeFileSync(unreadable, 'x'.repeat(50)); chmodSync(unreadable, 0o000)
-    const { events, files } = collectEvents(0)
+    const { events, files } = await collectEvents(0)
     expect(events).toHaveLength(1); expect(events[0]).toMatchObject({ cacheRead: 0, cacheWrite: 0, key: null })
     expect(files).toBe(2)
     chmodSync(join(root, 'locked'), 0o755); chmodSync(unreadable, 0o644)
@@ -52,12 +51,7 @@ describe('worktree naming leftovers', () => {
 })
 
 describe('lib leftovers', () => {
-  it('diffSides falls back to the old line for context rows without a new line; resetsOn handles null; wav clamps', () => {
-    const { realLine } = sidesOf({ path: 'x', status: 'M', added: 0, removed: 0, isBinary: false, hunks: [{ id: 1, header: '', lines: [{ id: 1, kind: 'context', text: 'c', oldLine: 4, newLine: null }] }] } as any)
-    expect(realLine).toEqual([4])
-    // And the other way: a row known only by its new line still numbers the old side.
-    const { originalLine } = sidesOf({ path: 'x', status: 'M', added: 0, removed: 0, isBinary: false, hunks: [{ id: 1, header: '', lines: [{ id: 1, kind: 'context', text: 'c', oldLine: null, newLine: 7 }] }] } as any)
-    expect(originalLine).toEqual([7])
+  it('resetsOn handles null; wav clamps', () => {
     expect(resetsOn(null)).toBe('')
     expect(new DataView(encodeWav(new Float32Array([1.5]), 8000)).getInt16(44, true)).toBe(32767)
   })

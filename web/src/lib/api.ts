@@ -1,4 +1,4 @@
-import type { PRResult, Session } from '../../shared/types.ts'
+import type { EngineKind, PRResult, Session } from '../../shared/types.ts'
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
@@ -65,6 +65,7 @@ export interface AgentTask {
   pid: number | null
   startedAt: number
   tools: import('../../shared/types.ts').ActiveTool[]
+  background: import('../../shared/types.ts').BackgroundTask[]
   finished: import('../../shared/types.ts').FinishedTool[]
   processes: TaskProcess[]
 }
@@ -86,6 +87,8 @@ export const api = {
   newSession: (worktreeID: string) => post(`/api/worktree/${worktreeID}/session`),
 
   addProject: (path: string) => post('/api/project', { path }),
+  folders: (path?: string) =>
+    json<import('../../shared/types.ts').FolderListing>(`/api/folders${path ? `?path=${encodeURIComponent(path)}` : ''}`),
   deleteProject: (id: string) => json(`/api/project/${id}`, { method: 'DELETE' }),
 
   newWorktree: (projectID: string, options: Record<string, unknown> = {}) =>
@@ -96,6 +99,15 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(patch),
     }),
+  newStack: (projectID: string) => post(`/api/project/${projectID}/stack`) as Promise<{ session: { id: string } }>,
+  addLayer: (stackID: string) => post(`/api/stack/${stackID}/layer`) as Promise<{ session: { id: string } }>,
+  renameStack: (id: string, name: string) =>
+    json(`/api/stack/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  dissolveStack: (id: string) => json(`/api/stack/${id}`, { method: 'DELETE' }),
+  removeLayer: (stackID: string, worktreeID: string) => json(`/api/stack/${stackID}/layer/${worktreeID}`, { method: 'DELETE' }),
+  updateStack: (id: string) => post(`/api/stack/${id}/update`) as Promise<{ results: import('../../shared/types.ts').LayerResult[] }>,
+  openStackPRs: (id: string) => post(`/api/stack/${id}/prs`) as Promise<{ results: import('../../shared/types.ts').LayerResult[] }>,
+  landStack: (id: string) => post(`/api/stack/${id}/land`) as Promise<{ results: import('../../shared/types.ts').LayerResult[] }>,
   deleteWorktree: (id: string, keepOnDisk = false) =>
     json(`/api/worktree/${id}${keepOnDisk ? '?keepOnDisk=1' : ''}`, { method: 'DELETE' }),
   addGroup: (projectID: string, name: string) => post(`/api/project/${projectID}/group`, { name }),
@@ -111,6 +123,10 @@ export const api = {
     json<{ liveBranch: string | null; changedFiles: number; branchesInUse: string[] }>(
       `/api/worktree/${id}/info`),
 
+  diffFile: (path: string, scope: string, base: string | null | undefined, file: string, sha?: string) =>
+    json<{ before: string | null; after: string | null }>(
+      `/api/diff/file?path=${encodeURIComponent(path)}&scope=${scope}&file=${encodeURIComponent(file)}` +
+      (base ? `&base=${encodeURIComponent(base)}` : '') + (sha ? `&sha=${sha}` : '')),
   diff: (path: string, scope: string, base?: string | null, context = 3, sha?: string, fresh?: boolean) =>
     json<{ files: any[]; base?: string | null; turn?: { sessionID: string; endedAt: number } | null }>(
       `/api/diff?path=${encodeURIComponent(path)}&scope=${scope}&context=${context}` +
@@ -134,8 +150,8 @@ export const api = {
       body: JSON.stringify({ path, text, modified }),
     }),
 
-  usage: () => json<UsageReport>('/api/usage'),
-  planUsage: () => json<PlanUsageResponse>('/api/plan-usage'),
+  usage: (engine: EngineKind) => json<UsageReport>(`/api/usage?engine=${engine}`),
+  planUsage: (engine: EngineKind) => json<PlanUsageResponse>(`/api/plan-usage?engine=${engine}`),
   prs: (projectID: string, refresh = false) =>
     json<PRResult>(`/api/prs?project=${projectID}${refresh ? '&refresh=1' : ''}`),
   prDetails: (projectID: string) => json<PRResult>(`/api/prs/details?project=${projectID}`),
@@ -188,6 +204,7 @@ export const api = {
       Promise<{ text: string | null; error: string | null }>,
 
   settings: () => json<any>('/api/settings'),
+  models: () => json<import('../../shared/models.ts').ModelCatalog>('/api/models'),
   saveSettings: (patch: Record<string, unknown>) =>
     json<any>('/api/settings', {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch),
@@ -196,7 +213,7 @@ export const api = {
   tasks: () => json<TasksResponse>('/api/tasks'),
   killProcess: (pid: number) => json(`/api/tasks/process/${pid}`, { method: 'DELETE' }),
   terminals: (worktreeID: string) => json<{ terminals: TerminalInfo[] }>(`/api/worktree/${worktreeID}/terminals`),
-  openTerminal: (worktreeID: string, options: { ifNone?: boolean } = {}) =>
+  openTerminal: (worktreeID: string, options: { ifNone?: boolean; login?: 'claude' | 'codex' } = {}) =>
     post(`/api/worktree/${worktreeID}/terminals`, options) as Promise<TerminalInfo>,
   closeTerminal: (id: string) => json(`/api/terminal/${id}`, { method: 'DELETE' }),
   attention: (sessionID: string | null, focused: boolean) =>

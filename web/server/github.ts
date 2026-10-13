@@ -42,6 +42,39 @@ async function gh(cwd: string, args: string[]): Promise<string> {
   return stdout
 }
 
+/** The words gh or git used for a failure, rather than Node's "Command failed" wrapper. */
+export function failureText(error: unknown): string {
+  const failure = error as { stderr?: string; message: string }
+  return (failure.stderr || failure.message).trim()
+}
+
+/** The open pull request whose head is this branch, if there is one. */
+export async function openPullRequestFor(projectPath: string, branch: string): Promise<{ number: number; url: string } | null> {
+  const found = JSON.parse(await gh(projectPath, ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url']))
+  return found[0] ?? null
+}
+
+export async function createPullRequest(projectPath: string, options: { base: string; head: string; title: string; body: string }): Promise<string> {
+  const out = await gh(projectPath, ['pr', 'create', '--draft', '--base', options.base, '--head', options.head,
+    '--title', options.title, '--body', options.body])
+  return out.trim().split('\n').pop()!
+}
+
+/** The way this repository lets pull requests be merged, squash first, as its settings allow. */
+export async function preferredMergeMethod(projectPath: string): Promise<'squash' | 'merge' | 'rebase'> {
+  const allowed = JSON.parse(await gh(projectPath, ['repo', 'view', '--json', 'squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed']))
+  if (allowed.squashMergeAllowed) return 'squash'
+  return allowed.mergeCommitAllowed ? 'merge' : 'rebase'
+}
+
+export async function mergePullRequest(projectPath: string, number: number, method: 'squash' | 'merge' | 'rebase'): Promise<void> {
+  await gh(projectPath, ['pr', 'merge', String(number), `--${method}`])
+}
+
+export async function retargetPullRequest(projectPath: string, number: number, base: string): Promise<void> {
+  await gh(projectPath, ['pr', 'edit', String(number), '--base', base])
+}
+
 const viewerCache = new Map<string, string>()
 export function resetGitHubCaches() { viewerCache.clear(); repoCache.clear() }
 

@@ -42,8 +42,22 @@ Project  (git repo; git init happens automatically when you add a non-git folder
   Source tab with **pyright/tsserver LSP navigation** — ⌘-click go-to-definition, hover for types.
 - **Claude Infra tab**: browse/edit global + project CLAUDE.md, memories, hooks, skills, agents,
   commands without digging through dotfiles.
-- **Usage tab**: live 5-hour Claude usage block (when it resets), block history, and
-  API-equivalent per-session costs (Claude cost from the CLI, Codex priced via Settings rates).
+- **Usage tab**: a Claude | Codex switch; each side shows the plan's limits (session and weekly,
+  with when they reset), today / 7 / 30 day spend, by model, by day, by project and per session.
+  Claude's limits come from its usage API; Codex's from the reading Codex writes into its own
+  session logs on every request, priced via the Settings rate.
+- **Agents can drive the sidebar**: every session (Claude and Codex) gets `list_workspace`,
+  `update_session`, `update_worktree`, `create_session`, `create_worktree`, `manage_folder` and
+  `manage_stack` as tools, so "move this session to the review worktree" or "rename that
+  worktree and file it under spikes" works from the chat. From any other shell or agent:
+  `node web/bin/sloperator.mjs` lists the same operations and
+  `node web/bin/sloperator.mjs update_session session="Fix login" title="Login fix"` runs one
+  (it finds the running app by itself; the same thing is `GET`/`POST /api/control`). A session
+  without Full access shows each change as a card in its chat and waits for your yes. No
+  worktree, session, branch or file is deleted this way, and no pull request is opened or landed.
+  A moved session keeps its transcript; its agent starts a new thread in the new folder, handed
+  the recent conversation. Nothing moves under a running agent: a session asked to move mid-turn
+  goes when the turn ends, and a worktree's directory is filed, renamed or repointed only when idle.
 - **Pull Requests tab**: `gh pr list` per project, CI status, one-click "review in new worktree".
 - **Slash-skill autocomplete** in the composer + quick-start skill/agent buttons on empty chats.
 

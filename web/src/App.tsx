@@ -10,7 +10,9 @@ import { CommandPalette, type Command } from './components/CommandPalette.tsx'
 import { NewWorktreeDialog, SettingsDialog } from './components/NewWorktreeDialog.tsx'
 import { WorktreeSetup } from './components/WorktreeSetup.tsx'
 import { readStored, startDrag, useStoredFlag, useStoredNumber, useStoredValue, writeStored } from './lib/resizable.ts'
-import { STRONGEST_MODEL } from '../shared/models.ts'
+import { FALLBACK_CATALOG, type ModelCatalog } from '../shared/models.ts'
+import { ModelSelect } from './components/ModelSelect.tsx'
+import { inWorktree, parseFileRef } from './lib/fileRef.ts'
 import { TasksTab } from './components/TasksTab.tsx'
 import { Toasts } from './components/Toasts.tsx'
 import { TerminalDrawer } from './components/TerminalDrawer.tsx'
@@ -24,12 +26,6 @@ import { quiet } from './lib/quiet.ts'
 
 type Tab = 'sessions' | 'infra' | 'usage' | 'prs' | 'github' | 'tasks'
 
-const MODELS: Record<Session['engine'], Array<[string, string]>> = {
-  claude: [['Fable 5', STRONGEST_MODEL.claude], ['Opus 5', 'claude-opus-5'],
-           ['Sonnet 5', 'claude-sonnet-5'], ['Haiku 4.5', 'claude-haiku-4-5-20251001']],
-  codex: [['gpt-5.5', STRONGEST_MODEL.codex], ['gpt-5.5-codex', 'gpt-5.5-codex'],
-          ['gpt-5.2-codex', 'gpt-5.2-codex'], ['gpt-5.2', 'gpt-5.2']],
-}
 const EFFORTS: Record<Session['engine'], Array<string | null>> = {
   claude: [null, 'low', 'medium', 'high', 'xhigh', 'max'],
   codex: [null, 'minimal', 'low', 'medium', 'high', 'xhigh'],
@@ -56,9 +52,13 @@ export default function App() {
   const [showReview, setShowReview] = useStoredFlag('orchestrator.showReview', true)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [generation, setGeneration] = useState(0)
+  const [catalog, setCatalog] = useState<ModelCatalog>(FALLBACK_CATALOG)
+  // The built-in list stands until the server's answer arrives, and if that answer is not a catalog at all.
+  useEffect(() => { api.models().then((next) => { if (next?.claude?.models && next?.codex?.models) setCatalog(next) }).catch(() => {}) }, [])
   const [worktreeDialog, setWorktreeDialog] = useState<typeof store.projects[number] | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showTerminal, setShowTerminal] = useStoredFlag('orchestrator.showTerminal', false)
+  const [signIn, setSignIn] = useState<{ engine: 'claude' | 'codex'; nonce: number } | null>(null)
   const [chatCollapsed, setChatCollapsed] = useStoredFlag('orchestrator.chatCollapsed', false)
   const [density, setDensity] = useState<LogDensity>(loadDensity)
   const chooseDensity = (value: LogDensity) => { setDensity(value); saveDensity(value) }
@@ -218,10 +218,10 @@ export default function App() {
       })
     }
     if (session) {
-      for (const [label, value] of MODELS[session.engine]) {
+      for (const { id, label } of catalog[session.engine].models) {
         list.push({
-          id: `model-${label}`, group: 'Model', label: `Model: ${label}`,
-          run: () => void api.patchSession(session.id, { model: value }),
+          id: `model-${id}`, group: 'Model', label: `Model: ${label}`,
+          run: () => void api.patchSession(session.id, { model: id }),
         })
       }
       for (const value of EFFORTS[session.engine]) {
@@ -256,7 +256,7 @@ export default function App() {
       list.push({ id: `tab-${id}`, group: 'Go to', label, run: () => setTab(id) })
     }
     return list
-  }, [store.sessions, store.worktrees, store.projects, session, openSession, openWorktree, refresh])
+  }, [store.sessions, store.worktrees, store.projects, session, openSession, openWorktree, refresh, catalog])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -337,6 +337,7 @@ export default function App() {
             projects={store.projects}
             worktrees={store.worktrees}
             sessions={store.sessions}
+            stacks={store.stacks}
             running={store.running}
             attention={attention}
             asking={store.asking}
@@ -414,10 +415,14 @@ export default function App() {
                     setComments((current) => current.filter((comment) => comment.id !== id))}
                   onClearComments={() => setComments([])}
                   onContinue={() => void api.retry(session.id).catch(reportError)}
+                  onSignIn={() => { setSignIn({ engine: session.engine, nonce: Date.now() }); setShowTerminal(true) }}
                   density={density}
-                  onOpenFile={(path) => {
+                  onOpenFile={(reference) => {
                     setShowReview(true)
-                    setOpenRequest({ path: path.startsWith('/') ? path : `${worktree.path}/${path}`, nonce: Date.now() })
+                    // "a.py:12" is a.py at line 12; a path written against another checkout of this project is read here.
+                    const { path, line } = parseFileRef(reference)
+                    const checkouts = store.worktrees.filter((entry) => entry.projectID === worktree.projectID).map((entry) => entry.path)
+                    setOpenRequest({ path: inWorktree(path, worktree.path, checkouts), line, nonce: Date.now() })
                   }}
                   resolveImage={(src) => api.rawFileURL(src.startsWith('/') ? src : `${worktree.path}/${src}`)}
                 />
@@ -447,11 +452,8 @@ export default function App() {
                     <option value="claude">Claude</option>
                     <option value="codex">Codex</option>
                   </select>
-                  <select className="chip-button" aria-label="Model" value={session.model ?? STRONGEST_MODEL[session.engine]}
-                          onChange={(event) => void api.patchSession(session.id, { model: event.target.value })}>
-                    {MODELS[session.engine].map(([label, value]) => (
-                      <option key={label} value={value}>{label}</option>))}
-                  </select>
+                  <ModelSelect engine={catalog[session.engine]} value={session.model ?? catalog[session.engine].strongest}
+                               onChange={(model) => void api.patchSession(session.id, { model })} />
                   <select className="chip-button" aria-label="Reasoning effort" value={session.effort ?? ''}
                           onChange={(event) => void api.patchSession(session.id, {
                             effort: event.target.value || null } as Partial<Session>)}>
@@ -491,7 +493,7 @@ export default function App() {
                 </div>
                 {showTerminal && (
                   <div className="h-[38%] min-h-[180px]">
-                    <TerminalDrawer worktreeID={worktree.id} worktreeName={worktree.name}
+                    <TerminalDrawer worktreeID={worktree.id} worktreeName={worktree.name} signIn={signIn}
                                     onClose={() => setShowTerminal(false)} />
                   </div>)}
                 </div>

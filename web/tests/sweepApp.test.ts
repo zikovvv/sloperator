@@ -172,6 +172,7 @@ describe('worktrees and files', () => {
     expect(worktree.branch).toBeNull()
     // Back as a plain folder git no longer owns, in a folder nothing can be moved out of or deleted from.
     mkdirSync(created.path, { recursive: true }); writeFileSync(join(created.path, 'keep.txt'), 'x')
+    await h.post(`/api/project/${projectID}/group`, { name: 'review' })
     chmodSync(dirname(created.path), 0o555)
     try {
       expect((await h.post(`/api/worktree/${created.id}/move`, { group: 'review' })).status).toBe(500)
@@ -183,6 +184,9 @@ describe('worktrees and files', () => {
     const other = (await json(await h.post(`/api/project/${projectID}/worktree`, { group: 'review' }))).worktree
     expect((await h.post(`/api/worktree/${other.id}/move`, {})).status).toBe(200)
     expect((await json(await h.get('/api/state'))).worktrees.find((entry: any) => entry.id === other.id).group).toBeNull()
+    // Asked again, it is already there: its directory keeps its name.
+    const settled = (await json(await h.get('/api/state'))).worktrees.find((entry: any) => entry.id === other.id).path
+    expect((await json(await h.post(`/api/worktree/${other.id}/move`, {}))).worktree.path).toBe(settled)
     expect((await h.patch(`/api/project/${projectID}/group/review`, {})).status).toBe(400)
   })
 

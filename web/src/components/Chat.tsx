@@ -31,6 +31,8 @@ interface Props {
   density: LogDensity
   /** Picks a failed turn back up. */
   onContinue: () => void
+  /** Opens a terminal running the engine's own login, for a turn that failed because its login did. */
+  onSignIn?: () => void
   /** A path the agent wrote (absolute, or relative to the worktree) as a URL an <img> can load. */
   resolveImage?: (src: string) => string | null
 }
@@ -151,9 +153,9 @@ function FoldedStep({ step, live, density, onOpenFile, resolveImage }: {
 }
 
 /** A whole turn's work behind one line, once its answer has arrived. */
-function FoldedTurn({ turn, density, onOpenFile, resolveImage, onContinue, running }: {
+function FoldedTurn({ turn, density, onOpenFile, resolveImage, onContinue, onSignIn, running }: {
   turn: Turn; density: LogDensity; onOpenFile: (path: string) => void; resolveImage?: (src: string) => string | null
-  onContinue: () => void; running: boolean
+  onContinue: () => void; onSignIn?: () => void; running: boolean
 }) {
   const [open, setOpen] = useState(false)
   const steps = stepsOf(turn)
@@ -165,22 +167,22 @@ function FoldedTurn({ turn, density, onOpenFile, resolveImage, onContinue, runni
         <span className="text-ink-600">{open ? '▾' : '▸'}</span>
         <span>Worked in {steps.length} step{steps.length === 1 ? '' : 's'} · {tools} tool call{tools === 1 ? '' : 's'}</span>
       </button>
-      {open && <div className="ml-4"><Blocks turn={turn} live={false} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} running={running} /></div>}
+      {open && <div className="ml-4"><Blocks turn={turn} live={false} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} onSignIn={onSignIn} running={running} /></div>}
     </div>
   )
 }
 
 /** A turn's steps and notes in the order they happened; only the last step of a running turn is live. */
-function Blocks({ turn, live, density, onOpenFile, resolveImage, onContinue, running }: {
+function Blocks({ turn, live, density, onOpenFile, resolveImage, onContinue, onSignIn, running }: {
   turn: Turn; live: boolean; density: LogDensity; onOpenFile: (path: string) => void; resolveImage?: (src: string) => string | null
-  onContinue: () => void; running: boolean
+  onContinue: () => void; onSignIn?: () => void; running: boolean
 }) {
   const lastStep = turn.blocks.map((block) => block.kind).lastIndexOf('step')
   return (
     <>
       {turn.blocks.map((block, index) => block.kind === 'note'
         ? (block.item.role === 'error'
-            ? <ErrorItem key={block.item.id} item={block.item} running={running} onContinue={onContinue} />
+            ? <ErrorItem key={block.item.id} item={block.item} running={running} onContinue={onContinue} onSignIn={onSignIn} />
             : block.item.role === 'permission' && block.item.permission
               ? <PermissionCard key={block.item.id} item={block.item} />
               : <div key={block.item.id} className="text-center text-[11px] text-ink-500">{block.item.text}</div>)
@@ -255,19 +257,34 @@ export function isConnectionFailure(text: string): boolean {
   return CONNECTION_FAILURE.test(text)
 }
 
-function ErrorItem({ item, running, onContinue }: { item: TranscriptItem; running: boolean; onContinue: () => void }) {
+const AUTH_FAILURE = /authenticat|oauth|revoked|expired|not logged in|log ?in|\b401\b/i
+
+/** Whether a failure reads as the engine's login having lapsed, which only signing in again fixes. */
+export function isAuthFailure(text: string): boolean {
+  return AUTH_FAILURE.test(text)
+}
+
+function ErrorItem({ item, running, onContinue, onSignIn }: {
+  item: TranscriptItem; running: boolean; onContinue: () => void; onSignIn?: () => void
+}) {
+  const signedOut = !!onSignIn && isAuthFailure(item.text)
   return (
     <div className="rounded-md border border-bad/40 bg-bad/10 px-3 py-2 text-[12px] text-red-200">
       <div className="whitespace-pre-wrap">{item.text}</div>
       {item.canRetry && (
-        <div className="mt-2 flex items-center gap-2">
-          <button className="btn-primary py-0.5 text-[11px]" disabled={running}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {signedOut && (
+            <button className="btn-primary py-0.5 text-[11px]" title="Opens a terminal running the engine's login; finish it in the browser"
+                    onClick={onSignIn}>Sign in again</button>)}
+          <button className={`${signedOut ? 'chip-button' : 'btn-primary'} py-0.5 text-[11px]`} disabled={running}
                   title="Send your last message again; the engine resumes this conversation"
                   onClick={onContinue}>Continue</button>
           <span className="text-[11px] text-red-200/70">
-            {isConnectionFailure(item.text)
-              ? 'The engine could not be reached. Continue when the connection is back.'
-              : 'The turn did not finish.'}
+            {signedOut
+              ? 'The login was revoked or has expired. Sign in again, then Continue.'
+              : isConnectionFailure(item.text)
+                ? 'The engine could not be reached. Continue when the connection is back.'
+                : 'The turn did not finish.'}
           </span>
         </div>)}
     </div>
@@ -276,7 +293,7 @@ function ErrorItem({ item, running, onContinue }: { item: TranscriptItem; runnin
 
 export function Chat({
   session, items, running, skills, comments, onRemoveComment, onClearComments, onOpenFile, density,
-  onContinue, resolveImage,
+  onContinue, onSignIn, resolveImage,
 }: Props) {
   const [draft, setDraft] = useState('')
   const draftLoaded = useRef(false)
@@ -462,13 +479,13 @@ export function Chat({
               <div key={turn.user?.id ?? turn.answer?.id ?? turnIndex} className="space-y-2">
                 {turn.user && (
                   <div className="flex justify-end">
-                    <div className="max-w-[85%] rounded-lg rounded-br-sm bg-accent/20 px-3 py-2 ring-1 ring-inset ring-accent/30" data-quote-item={turn.user.id}>
+                    <div className="min-w-0 max-w-[85%] rounded-lg rounded-br-sm bg-accent/20 px-3 py-2 ring-1 ring-inset ring-accent/30" data-quote-item={turn.user.id}>
                       <Markdown text={turn.user.text} onOpenFile={onOpenFile} resolveImage={resolveImage} />
                     </div>
                   </div>)}
                 {foldAll
-                  ? <FoldedTurn turn={turn} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} running={running} />
-                  : <Blocks turn={turn} live={isLast && running} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} running={running} />}
+                  ? <FoldedTurn turn={turn} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} onSignIn={onSignIn} running={running} />
+                  : <Blocks turn={turn} live={isLast && running} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} onSignIn={onSignIn} running={running} />}
                 {turn.answer && (
                   <div className="space-y-1" data-quote-item={turn.answer.id}>
                     <div className="flex items-center gap-2 text-[10px] text-ink-500">
@@ -480,13 +497,13 @@ export function Chat({
                     <Markdown text={turn.answer.text} onOpenFile={onOpenFile} resolveImage={resolveImage} />
                   </div>)}
                 {turn.after.length > 0 && (
-                  <Blocks turn={{ ...turn, blocks: turn.after }} live={false} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} running={running} />)}
+                  <Blocks turn={{ ...turn, blocks: turn.after }} live={false} density={density} onOpenFile={onOpenFile} resolveImage={resolveImage} onContinue={onContinue} onSignIn={onSignIn} running={running} />)}
               </div>)
           }) : items.map((item, index) => {
             if (item.role === 'user') {
               return (
                 <div key={item.id} className="flex justify-end">
-                  <div className="max-w-[85%] rounded-lg rounded-br-sm bg-accent/20 px-3 py-2 ring-1 ring-inset ring-accent/30" data-quote-item={item.id}>
+                  <div className="min-w-0 max-w-[85%] rounded-lg rounded-br-sm bg-accent/20 px-3 py-2 ring-1 ring-inset ring-accent/30" data-quote-item={item.id}>
                     <Markdown text={item.text} onOpenFile={onOpenFile} resolveImage={resolveImage} />
                   </div>
                 </div>)
@@ -513,7 +530,7 @@ export function Chat({
                   <div className="whitespace-pre-wrap pt-1 text-[12px]">{item.text}</div>
                 </details>)
             }
-            if (item.role === 'error') return <ErrorItem key={item.id} item={item} running={running} onContinue={onContinue} />
+            if (item.role === 'error') return <ErrorItem key={item.id} item={item} running={running} onContinue={onContinue} onSignIn={onSignIn} />
             if (item.role === 'permission' && item.permission) return <PermissionCard key={item.id} item={item} />
             return <div key={item.id} className="text-center text-[11px] text-ink-500">{item.text}</div>
           })}
@@ -539,7 +556,7 @@ export function Chat({
           <div className="mx-auto flex max-w-3xl items-center gap-2 text-[12px] text-yellow-100">
             <span className="dot-running h-1.5 w-1.5 rounded-full bg-warn" />
             <span className="flex-1">
-              {pending.length === 1 ? 'Claude is waiting for your answer' : `Claude is waiting for ${pending.length} answers`}
+              {`${pending[0].engine === 'codex' ? 'Codex' : 'Claude'} is waiting for ${pending.length === 1 ? 'your answer' : `${pending.length} answers`}`}
             </span>
             <button className="chip-button" onClick={() => document.getElementById(`permission-${pending[0].permission!.id}`)?.scrollIntoView({ block: 'center' })}>
               Show

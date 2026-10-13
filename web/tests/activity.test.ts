@@ -31,7 +31,7 @@ afterAll(async () => { await h.stop() })
 
 describe('what a session is doing', () => {
   it('is nothing while it idles, and unknown for a session that does not exist', async () => {
-    expect(await activity()).toEqual({ running: false, startedAt: null, tools: [], finished: [], processes: [], agents: [] })
+    expect(await activity()).toEqual({ running: false, startedAt: null, tools: [], background: [], finished: [], processes: [], agents: [] })
     expect((await h.get('/api/session/nope/activity')).status).toBe(404)
   })
 

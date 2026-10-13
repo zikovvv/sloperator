@@ -15,7 +15,7 @@ export function PermissionCard({ item }: { item: TranscriptItem }) {
          className={`rounded-lg border px-3 py-2 text-[12px] ${request.status === 'pending' ? 'border-warn/60 bg-warn/10' : 'border-ink-800 bg-ink-900/60'}`}>
       {request.toolName === 'AskUserQuestion'
         ? <QuestionCard request={request} />
-        : <ApprovalCard request={request} />}
+        : <ApprovalCard request={request} asker={item.engine === 'codex' ? 'Codex' : 'Claude'} />}
     </div>
   )
 }
@@ -140,7 +140,7 @@ export function describeInput(toolName: string, input: unknown): { headline: str
   }
 }
 
-function ApprovalCard({ request }: { request: PermissionRequest }) {
+function ApprovalCard({ request, asker }: { request: PermissionRequest; asker: string }) {
   const [reason, setReason] = useState('')
   const [denying, setDenying] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -153,7 +153,7 @@ function ApprovalCard({ request }: { request: PermissionRequest }) {
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span className={`text-[10px] uppercase tracking-wide ${request.status === 'pending' ? 'text-warn' : 'text-ink-500'}`}>
-          {request.status === 'pending' ? 'Claude wants to run' : 'Claude asked to run'}
+          {request.status === 'pending' ? `${asker} wants to run` : `${asker} asked to run`}
         </span>
         <span className="font-mono text-[11px] text-ink-200">{request.toolName}</span>
         {headline && <span className="truncate font-mono text-[11px] text-ink-400" title={headline}>{headline}</span>}
@@ -164,7 +164,7 @@ function ApprovalCard({ request }: { request: PermissionRequest }) {
           <button className="btn-primary" disabled={busy} onClick={() => send({ behavior: 'allow' })}>Allow</button>
           {denying
             ? <>
-                <input className="field flex-1" aria-label="Why not" placeholder="Tell Claude why, or what to do instead" autoFocus
+                <input className="field flex-1" aria-label="Why not" placeholder={`Tell ${asker} why, or what to do instead`} autoFocus
                        value={reason} onChange={(event) => setReason(event.target.value)}
                        onKeyDown={(event) => { if (event.key === 'Enter') send({ behavior: 'deny', message: reason }) }} />
                 <button className="btn-danger" disabled={busy} onClick={() => send({ behavior: 'deny', message: reason })}>Deny</button>

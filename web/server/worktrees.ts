@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, relative } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 import { git, gitResult, currentBranch, defaultBranch, type GitResult } from './git.ts'
 import { suggestBranchName } from '../shared/branchName.ts'
 
@@ -175,6 +175,10 @@ export async function deleteWorktree(projectPath: string, worktreePath: string) 
   await git(projectPath, ['worktree', 'remove', '--force', worktreePath])
   // Whatever git would not remove (a folder that lost its .git) goes by hand; rmSync throws if it cannot.
   if (existsSync(worktreePath)) {
+    // A .git that is a directory is a repository's own checkout, which no worktree record may take with it.
+    if (lstatSync(join(worktreePath, '.git'), { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error(`${worktreePath} is a repository of its own, not a worktree: it was not removed`)
+    }
     rmSync(worktreePath, { recursive: true, force: true })
     await git(projectPath, ['worktree', 'prune'])
   }
@@ -201,6 +205,26 @@ export async function moveWorktree(
     throw new Error(gitFailure('git worktree move', moved))
   }
   return destination
+}
+
+/** A folder by where it really is, or as written when it is not on disk. */
+export const realPath = (path: string) => { try { return realpathSync(path) } catch { return path } }
+
+/** The real path of the checkout at `path`, if it is a checkout of the project's repository; rejects with why not. */
+export async function checkoutAt(projectPath: string, path: string): Promise<string> {
+  const ask = async (folder: string, what: string) =>
+    (await gitResult(folder, ['rev-parse', '--path-format=absolute', what])).stdout.trim()
+  const top = isAbsolute(path) ? await ask(path, '--show-toplevel') : ''
+  if (!top || realpathSync(path) !== top) throw new Error(`${path} is not the top folder of a git checkout`)
+  if (await ask(top, '--git-common-dir') !== await ask(projectPath, '--git-common-dir')) {
+    throw new Error(`${path} is a checkout of another repository`)
+  }
+  return top
+}
+
+/** Which of the project's folders a checkout sits in, if it sits directly in one. */
+export function folderHolding(projectName: string, path: string, groups: string[], rootOverride?: string | null): string | null {
+  return groups.find((group) => realPath(root(projectName, rootOverride, group)) === dirname(path)) ?? null
 }
 
 /** Fetches a pull request's head into a local branch and checks it out in its own worktree. */
