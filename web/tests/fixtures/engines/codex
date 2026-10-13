@@ -1,0 +1,35 @@
+#!/bin/bash
+# Fake codex: exec --json shape. The prompt is the last argument.
+prompt="${@: -1}"
+[ -n "$FAKE_ARGS_LOG" ] && printf '%s\n' "$*" >> "$FAKE_ARGS_LOG"
+echo '{"type":"thread.started","thread_id":"thread-fake"}'
+# RETITLE: the same rename through the orchestrator's server, found in the -c mcp_servers override.
+url=""; for a in "$@"; do [[ "$a" == mcp_servers.orchestrator.url=* ]] && url=$(printf '%s' "$a" | sed -e 's/^mcp_servers.orchestrator.url="//' -e 's/"$//'); done
+if [ -n "$url" ] && [[ "$prompt" == *"RETITLE"* ]]; then
+  title=$(printf '%s\n' "$prompt" | sed -n 's/.*RETITLE: *//p' | head -1)
+  said=$(HOST="$url" TITLE="$title" python3 - <<'PYX'
+import json, os, urllib.request
+arguments = {"title": os.environ["TITLE"]} if os.environ["TITLE"] else {}
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "rename_session", "arguments": arguments}}).encode()
+request = urllib.request.Request(os.environ['HOST'], data=body, headers={"content-type": "application/json", "accept": "application/json, text/event-stream"})
+print(json.load(urllib.request.urlopen(request, timeout=120))["result"]["content"][0]["text"])
+PYX
+)
+  esc=$(printf '%s' "$said" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+  echo '{"type":"item.started","item":{"id":"r1","type":"mcp_tool_call","server":"orchestrator","tool":"rename_session"}}'
+  echo '{"type":"item.completed","item":{"id":"r1","type":"mcp_tool_call","server":"orchestrator","tool":"rename_session","status":"completed"}}'
+  echo '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":'"$esc"'}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":3}}'
+  exit 0
+fi
+if [[ "$prompt" == *"NOCONV"* ]]; then echo '{"type":"error","message":"No conversation found with id thread-fake"}'; exit 1; fi
+echo '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"ls"}}'
+echo '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"ls","exit_code":0,"aggregated_output":"a\nb"}}'
+# EDITS: a file change, which Codex reports without any output.
+if [[ "$prompt" == *"EDITS"* ]]; then echo '{"type":"item.completed","item":{"id":"f1","type":"file_change","changes":[{"kind":"update","path":"a.py"}]}}'; fi
+bridge=0; [[ "$prompt" == *"Context from this conversation"* ]] && bridge=1
+# SILENT: a turn that ends without a word.
+if [[ "$prompt" != *"SILENT"* ]]; then
+echo '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"CODEX-REPLY bridge='"$bridge"' '"$(printf '%s' "$prompt" | tail -c 40 | tr '\n' ' ')"'"}}'
+fi
+echo '{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":3}}'

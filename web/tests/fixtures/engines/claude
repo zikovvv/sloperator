@@ -1,0 +1,143 @@
+#!/bin/bash
+# Fake claude: speaks enough stream-json for a whole turn. The prompt is the last argument.
+prompt="${@: -1}"
+# Session naming: a one-shot call that prints only a title. NAMEME asks for one (NAMEWAIT takes a
+# second, NAMEBROKEN fails); any other message gets no name, so titles elsewhere stay as typed.
+for a in "$@"; do [ "$a" = "--no-session-persistence" ] && naming=1; done
+if [ -n "$naming" ]; then
+  latest=$(printf '%s\n' "$prompt" | sed -n 's/^LATEST: //p' | head -1)
+  [[ "$latest" == *"NAMEBROKEN"* ]] && exit 1
+  [[ "$latest" == *"NAMEWAIT"* ]] && sleep 1
+  [[ "$latest" == *"NAMEME"* ]] && printf '"Named: %s."\n' "$(printf '%s' "$latest" | sed -e 's/NAMEME *//' -e 's/NAMEWAIT *//' | cut -c1-40)"
+  exit 0
+fi
+# Tests that care how the engine was started read its arguments back from this file.
+[ -n "$FAKE_ARGS_LOG" ] && printf '%s MCP_TOOL_TIMEOUT=%s\n' "$*" "$MCP_TOOL_TIMEOUT" >> "$FAKE_ARGS_LOG"
+sid="fake-$(date +%s%N)"
+for a in "$@"; do [ "$a" = "--resume" ] && resume=1; done
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+if [[ "$prompt" == *"FAIL"* ]]; then
+  echo '{"type":"result","is_error":true,"subtype":"error_during_execution","errors":["Failed to authenticate. API Error: 401"]}'
+  exit 1
+fi
+if [[ "$prompt" == *"SLOW"* ]]; then sleep 30; fi
+# NOCONV: the session Claude Code was asked to resume is gone.
+if [[ "$prompt" == *"NOCONV"* ]]; then
+  echo '{"type":"result","is_error":true,"subtype":"error_during_execution","errors":["No conversation found with session ID: fake"]}'
+  exit 1
+fi
+# CRASHQUIET: dies with a status and not a word on stderr.
+if [[ "$prompt" == *"CRASHQUIET"* ]]; then exit 3; fi
+# STUBBORN: ignores the polite signals; only SIGKILL ends it.
+if [[ "$prompt" == *"STUBBORN"* ]]; then trap '' INT TERM; while true; do sleep 1; done; fi
+# DEAFEND: ignores the polite signals, finishes its one tool call a moment later, then ends.
+if [[ "$prompt" == *"DEAFEND"* ]]; then
+  trap '' INT TERM
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t7","name":"Bash","input":{"command":"sleep 1"}}]}}'
+  sleep 1
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t7","content":"late"}]}}'
+  echo '{"type":"result","total_cost_usd":0.1,"duration_ms":10,"num_turns":1,"usage":{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}'
+  exit 0
+fi
+# ASK / APPROVE: bring a question or a Bash prompt to the permission host named in --mcp-config,
+# wait for the person's decision, then report what came back — the real CLI's exact exchange.
+host=""; prev=""
+for a in "$@"; do [ "$prev" = "--mcp-config" ] && host=$(printf '%s' "$a" | python3 -c 'import json,sys; print(list(json.load(sys.stdin)["mcpServers"].values())[0]["url"])'); [ "$a" = "--permission-prompt-tool" ] && prompts=1; prev="$a"; done
+# GIVEUP: the CLI's own wait for an approval runs out. The request stays open at the host while the
+# tool ends as a timeout, as the real CLI reports it; an unrelated tool finishes in between.
+if [ -n "$prompts" ] && [[ "$prompt" == *"GIVEUP"* ]]; then
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t11","name":"Bash","input":{"command":"make deploy"}}]}}'
+  HOST="$host" python3 - <<'PYX' &
+import json, os, urllib.request
+request = urllib.request.Request(os.environ['HOST'], headers={"content-type": "application/json", "accept": "application/json, text/event-stream"},
+  data=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "approve",
+    "arguments": {"tool_name": "Bash", "input": {"command": "make deploy"}, "tool_use_id": "t11"}}}).encode())
+try:
+    urllib.request.urlopen(request, timeout=600).read()
+except Exception:
+    pass
+PYX
+  asker=$!
+  sleep 0.8
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t12","name":"Read","input":{"file_path":"notes.md"}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t12","content":"notes"}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t11","is_error":true,"content":"<tool_use_error>Error calling tool (Bash): The operation timed out.</tool_use_error>"}]}}'
+  sleep 0.3
+  kill $asker 2>/dev/null
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"GAVE-UP"}]}}'
+  # The turn goes on a while: the card must close when the tool ends, not when the turn does.
+  sleep 3
+  echo '{"type":"result","total_cost_usd":0.1,"duration_ms":10,"num_turns":1,"usage":{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}'
+  exit 0
+fi
+if [ -n "$prompts" ] && { [[ "$prompt" == *"ASK"* ]] || [[ "$prompt" == *"APPROVE"* ]]; }; then
+  if [[ "$prompt" == *"ASK"* ]]; then
+    input='{"questions":[{"question":"Continue?","header":"Confirm","options":[{"label":"Yes","description":"Go on"},{"label":"No","description":"Stop"}],"multiSelect":false}]}'
+    tool=AskUserQuestion
+  else
+    input='{"command":"python3 -c \"print(1)\"","description":"Probe"}'
+    tool=Bash
+  fi
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t9","name":"'"$tool"'","input":'"$input"'}]}}'
+  decision=$(HOST="$host" TOOL="$tool" INPUT="$input" python3 - <<'PYX'
+import json, os, urllib.request
+host = os.environ['HOST']
+def rpc(method, params, id=1):
+    body = json.dumps({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).encode()
+    req = urllib.request.Request(host, data=body, headers={"content-type": "application/json", "accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(req, timeout=600) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else None
+rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-claude", "version": "0"}})
+# The real CLI follows initialize with this notification, which gets 202 and no body.
+urllib.request.urlopen(urllib.request.Request(host, data=json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode(),
+                                              headers={"content-type": "application/json"}), timeout=600).read()
+result = rpc("tools/call", {"name": "approve", "arguments": {"tool_name": os.environ['TOOL'], "input": json.loads(os.environ['INPUT']), "tool_use_id": "t9"}}, 2)
+print(result["result"]["content"][0]["text"])
+PYX
+)
+  # What the tool result looks like once the host has answered.
+  summary=$(printf '%s' "$decision" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(("answered: " + json.dumps(d["updatedInput"].get("answers", d["updatedInput"]))) if d["behavior"]=="allow" else "denied: " + d.get("message",""))')
+  esc=$(printf '%s' "$summary" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":'"$esc"'}]}}'
+  said=$(printf 'HOST-SAID %s' "$summary" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":'"$said"'}]}}'
+  echo '{"type":"result","total_cost_usd":0.1,"duration_ms":10,"num_turns":1,"usage":{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}'
+  exit 0
+fi
+# RETITLE: the person asked for a rename. The agent calls the orchestrator's rename tool with the
+# title after "RETITLE:", or with none, and repeats what the tool said.
+if [ -n "$host" ] && [[ "$prompt" == *"RETITLE"* ]]; then
+  title=$(printf '%s\n' "$prompt" | sed -n 's/.*RETITLE: *//p' | head -1)
+  targs=$(TITLE="$title" python3 -c 'import json,os; t=os.environ["TITLE"]; print(json.dumps({"title": t} if t else {}))')
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t10","name":"mcp__orchestrator__rename_session","input":'"$targs"'}]}}'
+  said=$(HOST="$host" ARGS="$targs" python3 - <<'PYX'
+import json, os, urllib.request
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "rename_session", "arguments": json.loads(os.environ['ARGS'])}}).encode()
+request = urllib.request.Request(os.environ['HOST'], data=body, headers={"content-type": "application/json", "accept": "application/json, text/event-stream"})
+print(json.load(urllib.request.urlopen(request, timeout=120))["result"]["content"][0]["text"])
+PYX
+)
+  esc=$(printf '%s' "$said" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t10","content":'"$esc"'}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":'"$esc"'}]}}'
+  echo '{"type":"result","total_cost_usd":0.1,"duration_ms":10,"num_turns":1,"usage":{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}'
+  exit 0
+fi
+# STALL: a subagent that takes its time, so there is something in flight to look at and kill.
+if [[ "$prompt" == *"STALL"* ]]; then
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t8","name":"Task","input":{"description":"sub agent","prompt":"look around"}}]}}'
+  sleep 30
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t8","content":"done"}]}}'
+fi
+# TOUCH: leaves a file behind in the worktree, so there is a "last turn" to look at. The short
+# wait lets the pre-turn snapshot finish first, the way a real engine outlasts it.
+if [[ "$prompt" == *"TOUCH"* ]]; then sleep 0.4; echo "touched by the fake" > touched.txt; fi
+# REFUSE: what Claude Code prints when it turns a tool down itself (no host to ask).
+if [[ "$prompt" == *"REFUSE"* ]]; then
+  echo '{"type":"system","subtype":"permission_denied","tool_name":"Bash","message":"This command requires approval"}'
+fi
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"echo hi"}}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"hi"}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"considering"},{"type":"text","text":"FAKE-REPLY resume='"${resume:-0}"' prompt='"$(printf '%s' "$prompt" | head -c 60 | tr '\n' ' ')"'"}]}}'
+echo '{"type":"result","total_cost_usd":0.25,"duration_ms":10,"num_turns":1,"usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5,"output_tokens":7}}'

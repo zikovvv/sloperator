@@ -1,0 +1,21 @@
+{
+  "include": [
+    "server/**/*.ts",
+    "shared/testPaths.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "exclude": [
+    "server/index.ts",
+    "src/lib/monaco.ts",
+    "src/main.tsx",
+    "src/vite-env.d.ts",
+    "**/*.d.ts"
+  ],
+  "reporter": [
+    "text-summary",
+    "html"
+  ],
+  "report-dir": "coverage/ui",
+  "temp-dir": ".nyc_output"
+}

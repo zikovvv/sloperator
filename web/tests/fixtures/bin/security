@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake keychain: prints the credential blob the real one would, or nothing when told to.
+[ -n "$FAKE_SECURITY_EMPTY" ] && exit 44
+echo '{"claudeAiOauth":{"accessToken":"fake-token","rateLimitTier":"default_claude_max_20x","subscriptionType":"max","expiresAt":9999999999999}}'

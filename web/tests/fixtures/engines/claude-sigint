@@ -1,0 +1,7 @@
+#!/bin/bash
+# A claude that catches the interrupt the way the real CLI does: it reports a diagnostic and
+# exits non-zero instead of dying of the signal.
+trap 'echo "{\"type\":\"result\",\"is_error\":true,\"subtype\":\"error_during_execution\",\"errors\":[\"[ede_diagnostic] result_type=user stop_reason=tool_use\"]}"; exit 130' INT
+echo '{"type":"system","subtype":"init","session_id":"sig-1"}'
+for i in $(seq 60); do sleep 0.5; done
+echo '{"type":"result","is_error":false,"result":"FAKE-REPLY finished","total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1}}'

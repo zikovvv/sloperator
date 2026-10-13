@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# Fake language server: enough JSON-RPC for initialize, didOpen/didChange, definition and hover.
+import sys, json, time
+def read():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line: return None
+        if line in (b"\r\n", b"\n"): break
+        k, v = line.decode().split(":", 1); headers[k.strip().lower()] = v.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+def write(msg):
+    body = json.dumps(msg).encode(); sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body); sys.stdout.buffer.flush()
+while True:
+    m = read()
+    if m is None: break
+    method = m.get("method")
+    if method == "initialize":
+        # Frames arrive as they please: a junk header block, a split frame, notifications, odd requests.
+        sys.stdout.buffer.write(b"X-Junk: yes\r\n\r\n"); sys.stdout.buffer.flush()
+        body = json.dumps({"jsonrpc":"2.0","id":m["id"],"result":{"capabilities":{}}}).encode()
+        sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body)); sys.stdout.buffer.flush(); time.sleep(0.05)
+        sys.stdout.buffer.write(body); sys.stdout.buffer.flush()
+        write({"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"hello"}})
+        # Server-to-client requests, which the client must answer generically.
+        write({"jsonrpc":"2.0","id":9001,"method":"workspace/configuration","params":{"items":[{}]}})
+        write({"jsonrpc":"2.0","id":9002,"method":"workspace/configuration","params":{}})
+    elif method == "textDocument/references":
+        uri = m["params"]["textDocument"]["uri"]
+        if m["params"]["position"]["line"] == 50: write({"jsonrpc":"2.0","id":m["id"],"result":[]})
+        elif m["params"]["position"]["line"] == 51: write({"jsonrpc":"2.0","id":m["id"],"error":{"message":"references exploded"}})
+        elif m["params"]["position"]["line"] == 52: write({"jsonrpc":"2.0","id":m["id"],"result":None})
+        else: write({"jsonrpc":"2.0","id":m["id"],"result":[{"uri":uri,"range":{"start":{"line":2,"character":4}}},{"uri":uri.rsplit("/",1)[0]+"/other.py","range":{"start":{"line":9,"character":0}}}]})
+    elif method == "textDocument/definition":
+        uri = m["params"]["textDocument"]["uri"]
+        if m["params"]["position"]["line"] == 99: write({"jsonrpc":"2.0","id":m["id"],"result":None})
+        elif m["params"]["position"]["line"] == 98: write({"jsonrpc":"2.0","id":m["id"],"error":{"message":"boom"}})
+        elif m["params"]["position"]["line"] == 97: pass   # never answers: the deadline fires
+        elif m["params"]["position"]["line"] == 96: write({"jsonrpc":"2.0","id":m["id"],"result":[{"targetUri":uri.rsplit("/",1)[0]+"/other.py","targetSelectionRange":{"start":{"line":3,"character":2}}},{"nothing":True}]})
+        else: write({"jsonrpc":"2.0","id":m["id"],"result":{"uri":uri,"range":{"start":{"line":1,"character":4}}}})
+    elif method == "textDocument/hover":
+        line = m["params"]["position"]["line"]
+        if line == 99: write({"jsonrpc":"2.0","id":m["id"],"result":None})
+        elif line == 98: write({"jsonrpc":"2.0","id":m["id"],"result":{"contents":"plain text hover"}})
+        elif line == 96: write({"jsonrpc":"2.0","id":m["id"],"result":{"contents":{"kind":"markdown"}}})
+        elif line == 95: write({"jsonrpc":"2.0","id":m["id"],"error":{"message":"hover exploded"}})
+        elif line == 97: write({"jsonrpc":"2.0","id":m["id"],"result":{"contents":["part one",{"value":"part two"},{"nothing":1}]}})
+        else: write({"jsonrpc":"2.0","id":m["id"],"result":{"contents":{"value":"```python\ndef greet\n```"}}})
+    elif "id" in m and method not in (None,):
+        write({"jsonrpc":"2.0","id":m["id"],"result":None})

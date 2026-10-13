@@ -1,0 +1,11 @@
+.build/
+dist/
+.DS_Store
+web/node_modules
+web/dist/
+web/release/
+web/electron/server.cjs
+web/test-results/
+web/.nyc_output/
+web/coverage/
+web/playwright-report/

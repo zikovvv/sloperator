@@ -1,0 +1,266 @@
+import { test, expect } from '@playwright/test'
+import { resetState, collectCoverage, open, openFreshSession, projectMenu, rowMenu, confirmDialog, state } from './helpers.ts'
+
+// Per test, not per file: a leftover worktree or session from the previous test used to
+// decide whether this one passed.
+test.beforeEach(async ({ page }) => { await resetState(page) })
+test.afterEach(async ({ page }) => { await collectCoverage(page) })
+
+test('Pull Requests: foreign PR gets Review, review opens a worktree under PR Reviews and a session; then Open worktree', async ({ page }) => {
+  await open(page)
+  await page.getByRole('tab', { name: 'Pull Requests' }).click()
+  await expect(page.getByText('signed in as octo')).toBeVisible()
+  const widgets = page.locator('main .panel').filter({ hasText: 'Add widgets' })
+  await expect(widgets.getByRole('button', { name: 'Review' })).toBeVisible()
+  await expect(page.locator('main .panel').filter({ hasText: 'Mine' }).getByRole('button', { name: /Review|Open worktree/ })).toHaveCount(0)
+  await expect(widgets).toContainText(/tests \+30/)
+  await widgets.getByRole('button', { name: 'Review' }).click()
+  await expect(page.getByPlaceholder(/Message the agent/)).toBeVisible()
+  await expect(page.locator('nav')).toContainText(/PR Reviews/i)
+  await expect(page.getByText(/FAKE-REPLY/)).toBeVisible()
+  await page.getByRole('tab', { name: 'Pull Requests' }).click()
+  await expect(widgets.getByRole('button', { name: 'Open worktree' })).toBeVisible()
+  await widgets.getByRole('button', { name: 'Open worktree' }).click()
+  await expect(page.getByPlaceholder(/Message the agent/)).toBeVisible()
+})
+
+test('Pull Requests: unread badge, requested review, draft/ready, ages, Linear link, every sort, refresh, and Worktree on your own PR', async ({ page }) => {
+  await open(page)
+  await page.getByRole('tab', { name: 'Pull Requests' }).click()
+  const widgets = page.locator('main .panel').filter({ hasText: 'Add widgets' })
+  const mine = page.locator('main .panel').filter({ hasText: 'Mine' })
+  await expect(widgets).toContainText('2 unread')
+  await expect(page.locator('main').getByText('2 unread').first()).toBeVisible()   // page total too
+  await expect(widgets).toContainText('review requested')
+  await expect(widgets).toContainText('ready')
+  await expect(widgets).toContainText(/assigned to.*octo/)
+  await expect(widgets).toContainText(/reviewers octo, core/)
+  await expect(widgets).toContainText(/6 commits/)
+  await expect(widgets).toContainText(/opened \d+\w+ ago/)
+  await expect(widgets.locator('img[alt="alice"]')).toHaveCount(1)
+  await expect(mine).toContainText('draft')
+  await expect(mine).toContainText('yours')
+  // Tier two: Linear link learned from the widgets PR body, applied to the bare key on Mine.
+  await expect(widgets.getByRole('link', { name: 'WID-7' })).toHaveAttribute('href', 'https://linear.app/acme-co/issue/WID-7')
+  await expect(mine.getByRole('link', { name: 'WID-8' })).toHaveAttribute('href', 'https://linear.app/acme-co/issue/WID-8')
+  await expect(widgets).toContainText(/you:.*3 inline/)
+
+  const numbers = async () => page.locator('main [data-testid^="pr-"]').evaluateAll((rows) => rows.map((row) => row.getAttribute('data-testid')))
+  await page.getByLabel('Sort by').selectOption('unread')
+  expect((await numbers())[0]).toBe('pr-7')
+  await page.getByRole('button', { name: 'Reverse order' }).click()
+  expect((await numbers()).at(-1)).toBe('pr-7')
+  await page.getByLabel('Sort by').selectOption('title')
+  expect(await numbers()).toEqual(['pr-7', 'pr-9', 'pr-8'])
+  await page.getByRole('button', { name: 'Refresh' }).click()
+  await expect(page.locator('main')).toContainText(/as of just now/)
+
+  // Your own PR's branch is not on this origin, so the head is fetched into a copy.
+  await mine.getByRole('button', { name: 'Worktree' }).click()
+  await expect(page.getByText(/orch\/pr-8 holds a copy/)).toBeVisible()   // a toast: survives leaving the tab
+  await expect(page.getByPlaceholder(/Message the agent/)).toBeVisible()
+  await page.getByRole('tab', { name: 'Pull Requests' }).click()
+  await expect(mine.getByRole('button', { name: 'Open worktree' })).toBeVisible()
+})
+
+test('the + button: a worktree on a generated branch from main, its chat open and focused, branch changeable at the top', async ({ page }) => {
+  await open(page)
+  await page.locator('nav').getByRole('button', { name: 'New worktree' }).first().click()
+  const composer = page.getByPlaceholder(/Message the agent/)
+  await expect(composer).toBeVisible()
+  await expect(composer).toBeFocused()
+  const setup = page.getByTestId('worktree-setup')
+  await expect(setup).toContainText(/orch\/[a-z]+-[a-z]+/)
+  await expect(setup).toContainText(/from\s*(origin\/)?main\s*·\s*folder\s*main/)
+  await setup.getByRole('button', { name: 'Worktree…' }).click()   // it opens only when asked for
+  await expect(page.getByLabel('Branch name')).toBeVisible()
+  await page.getByLabel('Branch name').fill('orch/e2e-renamed')
+  await page.getByLabel('Branch name').press('Enter')
+  await expect(setup).toContainText('orch/e2e-renamed')
+  await expect(page.locator('nav')).toContainText('e2e-renamed')   // the auto-named worktree follows
+  await composer.fill('hello from a fresh worktree'); await composer.press('Enter')
+  await expect(page.getByText(/FAKE-REPLY/)).toBeVisible()
+})
+
+test('GitHub tab: comments grouped by PR, link targets, Open & autofix opens a session with the fix prompt', async ({ page }) => {
+  await open(page)
+  await page.getByRole('tab', { name: 'GitHub' }).click()
+  await expect(page.locator('main')).toContainText('looks wrong')
+  await expect(page.locator('main')).not.toContainText('tests passed')   // bot filtered
+  await expect(page.locator('main a[href="https://example.com/c1"]')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Refresh' }).click()
+  await page.getByRole('button', { name: 'Open & autofix' }).first().click()
+  await expect(page.getByPlaceholder(/Message the agent/)).toBeVisible()
+  await expect(page.locator('main')).toContainText(/Fix all review comments/)
+})
+
+test('Usage: plan limits from the API, extra usage, and the local spend sections', async ({ page }) => {
+  await open(page)
+  await page.getByRole('tab', { name: 'Usage' }).click()
+  await expect(page.getByText('Plan usage limits')).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByText('Max (20x)')).toBeVisible()
+  await expect(page.getByText('34% used').or(page.getByText('30% used'))).toBeVisible()
+  await expect(page.getByText('Fable', { exact: true })).toBeVisible()
+  await expect(page.getByText('Pay-as-you-go credits')).toBeVisible()
+  await expect(page.getByText('What this machine has spent')).toBeVisible()
+  await expect(page.getByText('Rates used')).toBeVisible()
+})
+
+test('Settings: worktree root and both pricing tables edit and persist', async ({ page }) => {
+  await open(page)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Settings' })
+  await dialog.getByPlaceholder(/orchestrator\/worktrees/).fill('~/custom-worktrees')
+  await dialog.getByRole('spinbutton').nth(0).fill('2.5')
+  await dialog.getByRole('spinbutton').nth(3).fill('16')
+  await page.waitForTimeout(700)
+  await expect.poll(async () => (await page.evaluate(async () => (await fetch('/api/settings')).json())).worktreeRoot).toBe('~/custom-worktrees')
+  await dialog.getByPlaceholder(/orchestrator\/worktrees/).fill('')
+  await page.waitForTimeout(700)
+  await dialog.getByRole('button', { name: 'Done' }).click()
+  await expect(dialog).toBeHidden()
+})
+
+test('Claude Infra: category switch, preview, edit, save, and the discard dialog on unsaved edits', async ({ page }) => {
+  await open(page)
+  await page.getByRole('tab', { name: 'Claude Infra' }).click()
+  for (const category of ['Memories', 'Hooks', 'Skills', 'Agents', 'Commands', 'CLAUDE.md']) {
+    await page.locator('main').getByRole('button', { name: category, exact: true }).click()
+  }
+  await page.locator('main button').filter({ hasText: 'Global CLAUDE.md' }).first().click()
+  await expect(page.locator('main')).toContainText('Global rules for the e2e run')
+  await page.getByRole('button', { name: 'Edit' }).click()
+  const editor = page.locator('main textarea')
+  await expect(editor).not.toHaveValue('')
+  await editor.fill((await editor.inputValue()) + '\nextra line')
+  await expect(page.getByRole('button', { name: 'Save' })).toBeVisible()
+  await page.locator('main').getByRole('button', { name: 'Memories', exact: true }).click()
+  const discard = page.getByRole('alertdialog')
+  await expect(discard).toContainText('Discard unsaved edits?')
+  await discard.getByRole('button', { name: 'Cancel' }).click()
+  await page.locator('main').getByRole('button', { name: 'Memories', exact: true }).click()
+  await discard.getByRole('button', { name: 'Discard' }).click()
+  await expect(discard).toBeHidden()
+})
+
+test('command palette runs model, effort, access, engine and new-worktree commands', async ({ page }) => {
+  await open(page)
+  await openFreshSession(page)
+  const run = async (query: string) => {
+    await page.keyboard.press('ControlOrMeta+k')
+    const input = page.getByPlaceholder(/Jump to a session/)
+    await input.fill(query); await page.waitForTimeout(150); await input.press('Enter')
+  }
+  await run('opus')
+  await expect(page.getByRole('combobox', { name: 'Model' })).toHaveValue(/opus/)
+  await run('effort high')
+  await expect(page.getByRole('combobox', { name: 'Reasoning effort' })).toHaveValue('high')
+  await run('full access')
+  await expect(page.getByRole('combobox', { name: 'Access mode' })).toHaveValue('full')
+  await run('switch to codex')
+  await expect(page.getByRole('combobox', { name: 'Engine' })).toHaveValue('codex')
+  await run('choose branch')
+  await expect(page.getByRole('dialog', { name: 'New worktree' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'New worktree' })).toBeHidden()
+  await page.keyboard.press('ControlOrMeta+k')
+  await page.keyboard.press('Escape')
+  await run('xyzzy-nothing')
+})
+
+test('review: quote a selection to chat with cmd-Enter; the chat column tucks away and comes back', async ({ page }) => {
+  await open(page)
+  await openFreshSession(page)
+  await page.getByRole('button', { name: 'Files and settings' }).click()
+  await page.getByTestId('tree-file').filter({ hasText: 'app.py' }).first().click({ force: true })
+  const editor = page.locator('.monaco-diff-editor .view-line').first()
+  await expect(editor).toBeAttached({ timeout: 30_000 })
+  const input = page.locator('.monaco-diff-editor textarea.inputarea').last()
+  await input.focus()
+  await page.keyboard.press('End'); await page.keyboard.press('Shift+Home')
+  await expect(page.getByRole('button', { name: /Quote → chat/ })).toBeVisible()
+  await page.getByRole('button', { name: /Quote → chat/ }).click()
+  await expect(page.locator('main')).toContainText(/From src\/app\.py:\d+/)
+  await page.getByRole('button', { name: 'Hide chat' }).click()   // the review takes the whole room
+  await expect(page.getByPlaceholder(/Message the agent/)).toBeHidden()
+  await page.getByRole('button', { name: 'Show chat' }).click()
+  await page.getByRole('button', { name: 'Hide review panel' }).click()
+  await expect(page.getByText('Review', { exact: true })).toBeHidden()
+  await page.getByRole('button', { name: 'Show review panel' }).click()
+})
+
+test('Tasks: a running agent shows its commands and processes; killing the command it waits on ends the turn', async ({ page }) => {
+  await open(page)
+  await openFreshSession(page)
+  const box = page.getByPlaceholder(/Message the agent/)
+  await box.fill('SLOW inspect me'); await box.press('Enter')
+  await expect(page.getByText(/Working/)).toBeVisible()
+  await page.getByRole('tab', { name: 'Tasks' }).click()
+  await expect(page.locator('main').getByText(/Commands and their processes/)).toBeVisible()
+  await page.locator('main').getByRole('button', { name: 'Kill' }).first().click()
+  await expect(page.getByText('No agent is running')).toBeVisible({ timeout: 15_000 })
+})
+
+test('sidebar: drag a worktree onto a folder moves it; drag a folder reorders; archived worktree restores; remove from sidebar keeps disk', async ({ page }) => {
+  await open(page)
+  await projectMenu(page, 'Add group directory…')
+  await page.getByRole('dialog', { name: /New group/ }).getByRole('textbox').fill('drag-target')
+  await page.getByRole('dialog', { name: /New group/ }).getByRole('button', { name: 'OK' }).click()
+  await projectMenu(page, 'Quick worktree (auto branch, no questions)')
+  const quick = await (async () => {
+    // A quick worktree is named after its generated branch, so take the newest non-main one.
+    await expect.poll(async () => (await state(page)).worktrees.filter((entry: any) => !entry.isMain).length).toBeGreaterThan(0)
+    return (await state(page)).worktrees.filter((entry: any) => !entry.isMain).at(-1)
+  })()
+  // HTML5 drag-and-drop through the page's own events.
+  await page.evaluate(async (name) => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+    const nav = document.querySelector('nav')!
+    const grip = [...nav.querySelectorAll('[draggable="true"]')].find((node) => node.closest('div')?.textContent?.includes(name))!
+    const folder = [...nav.querySelectorAll('button[aria-expanded]')].find((node) => node.textContent?.includes('drag-target'))!.closest('div')!.parentElement!
+    const data = new DataTransfer()
+    grip.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data })); await frame()
+    folder.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: data, cancelable: true })); await frame()
+    folder.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: data, cancelable: true })); await frame()
+    grip.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: data }))
+  }, quick.name)
+  await expect.poll(async () => (await state(page)).worktrees.find((entry: any) => entry.id === quick.id)?.group).toBe('drag-target')
+  await page.evaluate(async () => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+    const nav = document.querySelector('nav')!
+    const grips = [...nav.querySelectorAll('span[draggable="true"]')].filter((node) => node.textContent === '⋮⋮')
+    const from = grips.find((node) => node.parentElement?.textContent?.includes('drag-target'))!
+    const to = grips.find((node) => node.parentElement?.textContent?.includes('main'))!.parentElement!.parentElement!
+    const data = new DataTransfer()
+    from.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data })); await frame()
+    to.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: data, cancelable: true })); await frame()
+    to.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: data, cancelable: true })); await frame()
+  })
+  await expect.poll(async () => (await state(page)).projects[0].worktreeGroups[0]).toBe('drag-target')
+  await rowMenu(page, quick.name, 'Archive')
+  await expect(page.locator('nav')).toContainText('Archived worktrees (1)')
+  await page.locator('nav summary').filter({ hasText: 'Archived worktrees' }).click()
+  await page.locator('nav').getByRole('button', { name: 'Restore' }).click()
+  await page.locator('nav').getByText(quick.name, { exact: true }).click()
+  await page.getByTestId('worktree-setup').getByRole('button', { name: 'Worktree…' }).click()
+  await page.getByRole('button', { name: 'Remove from sidebar' }).click()
+  await expect.poll(async () => (await state(page)).worktrees.some((entry: any) => entry.id === quick.id)).toBe(false)
+  await projectMenu(page, 'Add group directory…')
+  await page.getByRole('dialog', { name: /New group/ }).getByRole('button', { name: 'Cancel' }).click()
+})
+
+test('toasts and notices: a failed action shows a dismissible toast; a server notice raises a toast event', async ({ page }) => {
+  await open(page)
+  await page.getByRole('button', { name: '+ Add project' }).click()
+  await page.getByRole('dialog', { name: 'Add project' }).getByRole('textbox').fill('/definitely/not/here')
+  await page.getByRole('dialog', { name: 'Add project' }).getByRole('button', { name: 'OK' }).click()
+  const toast = page.getByRole('status')
+  await expect(toast).toContainText(/No such folder/)
+  await toast.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(toast).toBeHidden()
+  await openFreshSession(page)
+  await page.getByRole('combobox', { name: 'Engine' }).selectOption('claude')
+  const box = page.getByPlaceholder(/Message the agent/)
+  await box.fill('please FAIL loudly'); await box.press('Enter')
+  await expect(page.locator('main')).toContainText(/401/)
+})

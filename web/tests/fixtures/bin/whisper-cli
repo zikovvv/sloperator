@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake whisper: writes a transcript file next to the requested output prefix.
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-of" ] && out="$2"; shift; done
+[ -n "$FAKE_WHISPER_STDOUT_ONLY" ] && { echo "[00:00.000 --> 00:01.000]  spoken via stdout"; exit 0; }
+echo "[00:00.000 --> 00:01.000]  hello from whisper" > "$out.txt"

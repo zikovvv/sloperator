@@ -1,0 +1,177 @@
+#!/bin/bash
+# Fake GitHub CLI. FAKE_GH_MODE selects the scenario.
+case "$FAKE_GH_MODE" in
+  missing) exit 127 ;;
+  unauth) echo "gh: not logged in" >&2; exit 1 ;;
+esac
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then echo "octo"; exit 0; fi
+# The branch a pull request was opened against: #9 is stacked on feature/one, #0 has no such thing.
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$3" in
+    9) echo '{"baseRefName":"feature/one"}' ;;
+    0) echo '{}' ;;
+    *) echo '{"baseRefName":"main"}' ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "repo" ]; then echo '{"owner":{"login":"acme"},"name":"widgets"}'; exit 0; fi
+if [ "$1" = "api" ] && [[ "$2" == /notifications* ]]; then
+  case "$FAKE_GH_MODE" in
+    no-notifications) echo "gh: missing scope" >&2; exit 1 ;;
+  esac
+  cat <<'JSON'
+[{"unread":true,"subject":{"type":"PullRequest","url":"https://api.github.com/repos/acme/widgets/pulls/7"}},
+ {"unread":true,"subject":{"type":"PullRequest","url":"https://api.github.com/repos/acme/widgets/pulls/7"}},
+ {"unread":false,"subject":{"type":"PullRequest","url":"https://api.github.com/repos/acme/widgets/pulls/7"}},
+ {"unread":true,"subject":{"type":"Issue","url":"https://api.github.com/repos/acme/widgets/issues/4"}},
+ {"unread":true,"subject":{"type":"PullRequest","url":"https://api.github.com/repos/other/repo/pulls/7"}},
+ {"unread":true,"subject":{"type":"PullRequest","url":"https://api.github.com/repos/acme/widgets/pulls/nope"}}]
+JSON
+  exit 0
+fi
+# Review conversations for one branch: an anchored thread, an outdated one, and a general comment.
+if [ "$1" = "api" ] && [ "$2" = "graphql" ] && [[ "$*" == *reviewThreads* ]] && [[ "$*" == *headRefName:* ]]; then
+  case "$FAKE_GH_MODE" in
+    no-pr) echo '{"data":{"repository":{"pullRequests":{"nodes":[]}}}}'; exit 0 ;;
+    bare-pr) echo '{"data":{"repository":{"pullRequests":{"nodes":[{"number":9,"title":"Bare","url":"u","headRefOid":"beef"}]}}}}'; exit 0 ;;
+    threads-fail) echo "gh: graphql exploded" >&2; exit 1 ;;
+    threads-silent) exit 1 ;;
+  esac
+  cat <<'JSON'
+{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":7,"title":"Add widgets","url":"https://example.com/pr/7","headRefOid":"deadbee",
+   "comments":{"nodes":[{"id":"d1","author":{"login":"carol"},"body":"ship it","url":"u","createdAt":"2026-09-01T00:00:00Z"},
+                        {"id":"d2","author":{"login":"carol"},"body":"   ","url":"u","createdAt":"2026-09-01T00:00:00Z"}]},
+   "reviewThreads":{"nodes":[
+     {"id":"t1","isOutdated":false,"isResolved":false,"path":"src/app.py","line":12,"originalLine":12,
+      "comments":{"nodes":[{"id":"c1","author":{"login":"alice","avatarUrl":"https://example.com/a.png"},"body":"rename this","url":"u1","createdAt":"2026-09-01T00:00:00Z","diffHunk":"@@ -12 +12 @@"}]}},
+     {"id":"t2","isOutdated":true,"isResolved":true,"path":"src/gone.py","line":9,"originalLine":9,
+      "comments":{"nodes":[{"id":"c2","author":{"login":"bob"},"body":"was wrong","url":"u2","createdAt":"2026-09-01T00:00:00Z","diffHunk":"@@ -9 +9 @@\n-old"}]}},
+     {"id":"t3","isOutdated":false,"isResolved":false,"path":"src/empty.py","line":1,"originalLine":1,
+      "comments":{"nodes":[]}},
+     {"id":"t5","isOutdated":false,"isResolved":false,"path":"src/nothing.py","line":2,"originalLine":2},
+     {"id":"t4","isOutdated":false,"isResolved":false,
+      "comments":{"nodes":[{"id":"c4","body":"who wrote this","url":"u4","createdAt":"2026-09-01T00:00:00Z"}]}}
+   ]}}
+]}}}}
+JSON
+  exit 0
+fi
+# Posting a review comment on a line.
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ] && [[ "$4" == */pulls/*/comments ]]; then
+  case "$FAKE_GH_MODE" in
+    comment-fail) echo "gh: line is not part of the diff" >&2; exit 1 ;;
+    comment-silent) exit 1 ;;
+    comment-bare) echo '{}'; exit 0 ;;
+  esac
+  echo '{"html_url":"https://example.com/pr/7#discussion_r1"}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ] && [[ "$*" == *reviewRequests* ]]; then
+  cat <<'JSON'
+{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":7,"title":"[WID-7] Add widgets","url":"https://example.com/pr/7","isDraft":false,"state":"OPEN","mergedAt":null,"closedAt":null,
+   "createdAt":"2026-08-20T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","headRefName":"feature/widgets","baseRefName":"main",
+   "additions":40,"deletions":2,"changedFiles":2,
+   "author":{"login":"alice","avatarUrl":"https://example.com/alice.png"},
+   "assignees":{"nodes":[{"login":"octo","avatarUrl":"https://example.com/octo.png"}]},
+   "reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"octo"}},{"requestedReviewer":{"__typename":"Team","name":"core"}},{"requestedReviewer":null}]},
+   "commits":{"totalCount":6,"nodes":[{"commit":{"committedDate":"2026-08-31T12:00:00Z","statusCheckRollup":{"state":"SUCCESS","contexts":{"nodes":[
+     {"__typename":"CheckRun","name":"test","conclusion":"SUCCESS","status":"COMPLETED","detailsUrl":"https://example.com/run/1"},
+     {"__typename":"CheckRun","name":"lint","conclusion":"SKIPPED","status":"COMPLETED","detailsUrl":null},
+     {"__typename":"StatusContext","context":"coverage/report","state":"SUCCESS","targetUrl":"https://example.com/cov"},
+     null]}}}}]}},
+  {"number":8,"title":"Mine","url":"https://example.com/pr/8","isDraft":true,"state":"OPEN","mergedAt":null,"closedAt":null,
+   "createdAt":"2026-08-30T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","headRefName":"feat/WID-8-mine","baseRefName":"main",
+   "additions":0,"deletions":0,"changedFiles":0,
+   "author":{"login":"octo","avatarUrl":"https://example.com/octo.png"},
+   "assignees":{"nodes":[]},"reviewRequests":{"nodes":[]},
+   "commits":{"totalCount":1,"nodes":[{"commit":{"committedDate":"2026-08-30T00:00:00Z","statusCheckRollup":{"state":"PENDING","contexts":{"nodes":[
+     {"__typename":"CheckRun","name":"test","conclusion":null,"status":"IN_PROGRESS","detailsUrl":null}]}}}}]}},
+  {"number":9,"title":"Broken","url":"https://example.com/pr/9","isDraft":false,"state":"OPEN","mergedAt":null,"closedAt":null,
+   "createdAt":"2026-07-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","headRefName":"broken","baseRefName":"main",
+   "additions":3,"deletions":1,"changedFiles":1,
+   "author":{"login":"bob","avatarUrl":""},
+   "assignees":{"nodes":[]},"reviewRequests":{"nodes":[]},
+   "commits":{"totalCount":0,"nodes":[]}},
+  {"number":6,"title":"Shipped","url":"https://example.com/pr/6","isDraft":false,"state":"MERGED","mergedAt":"2026-08-28T00:00:00Z","closedAt":"2026-08-28T00:00:00Z",
+   "createdAt":"2026-08-25T00:00:00Z","updatedAt":"2026-08-28T00:00:00Z","headRefName":"shipped","baseRefName":"main",
+   "additions":1,"deletions":1,"changedFiles":1,"author":{"login":"alice","avatarUrl":""},"assignees":{"nodes":[]},"reviewRequests":{"nodes":[]},
+   "commits":{"totalCount":1,"nodes":[{"commit":{"committedDate":"2026-08-27T00:00:00Z","statusCheckRollup":{"state":"FAILURE","contexts":{"nodes":[
+     {"__typename":"CheckRun","name":"test","conclusion":"FAILURE","status":"COMPLETED","detailsUrl":"https://example.com/run/6"},
+     {"__typename":"StatusContext","context":"deploy","state":"PENDING","targetUrl":null}]}}}}]}},
+  {"number":5,"title":"Abandoned","url":"https://example.com/pr/5","isDraft":true,"state":"CLOSED","mergedAt":null,"closedAt":"2026-08-20T00:00:00Z",
+   "createdAt":"2026-08-10T00:00:00Z","updatedAt":"2026-08-20T00:00:00Z","headRefName":"abandoned","baseRefName":"main",
+   "additions":0,"deletions":0,"changedFiles":0,"author":{"login":"bob","avatarUrl":""},"assignees":{"nodes":[]},"reviewRequests":{"nodes":[]},
+   "commits":{"totalCount":0,"nodes":[]}},
+  {}
+]}}}}
+JSON
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ] && [[ "$*" == *reviewThreads* ]] && [[ "$*" != *search=* ]]; then
+  case "$FAKE_GH_MODE" in
+    no-details) echo "gh: graphql exploded" >&2; exit 1 ;;
+  esac
+  cat <<'JSON'
+{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":7,"author":{"login":"alice"},"bodyText":"Fixes https://linear.app/acme-co/issue/WID-7 for good",
+   "files":{"nodes":[{"path":"src/w.py","additions":10,"deletions":2},{"path":"tests/test_w.py","additions":30,"deletions":0}]},
+   "comments":{"nodes":[{"author":{"login":"octo"}},{"author":{"login":"octo"}},{"author":{"login":"alice"}},{"author":{"__typename":"Bot","login":"linear"}}]},
+   "reviews":{"nodes":[{"author":{"__typename":"Bot","login":"ci-bot","avatarUrl":""},"state":"COMMENTED"},
+                       {"author":{"login":"bob","avatarUrl":"https://example.com/bob.png"},"state":"COMMENTED"},
+                       {"author":{"login":"bob","avatarUrl":"https://example.com/bob.png"},"state":"CHANGES_REQUESTED"},
+                       {"author":{"login":"carol","avatarUrl":""},"state":"APPROVED"},
+                       {"author":{"login":"carol","avatarUrl":""},"state":"DISMISSED"},
+                       {"author":{"login":"octo"},"state":"APPROVED"},
+                       {"author":{"login":"octo"},"state":"PENDING"}]},
+   "commits":{"nodes":[{"commit":{"author":{"user":{"login":"octo"}}}},
+                       {"commit":{"author":{"user":{"login":"octo"}}}},
+                       {"commit":{"author":{"user":null}}},
+                       {"commit":{"author":{"user":{"login":"alice"}}}}]},
+   "reviewThreads":{"nodes":[
+     {"isResolved":true,"comments":{"nodes":[{"author":{"login":"bob"}},{"author":{"login":"octo"}}]}},
+     {"isResolved":false,"comments":{"nodes":[{"author":{"login":"bob"}}]}},
+     {"isResolved":false,"comments":{"nodes":[{"author":{"login":"bob"}},{"author":{"login":"octo"}}]}},
+     {"isResolved":false,"comments":{"nodes":[]}},
+     {"isResolved":false,"comments":{"nodes":[{"author":{"login":"octo"}},{"author":{"login":"bob"}}]}}]}},
+  {"number":8,"author":{"login":"octo"},"bodyText":"no link here",
+   "files":{"nodes":[]},"comments":{"nodes":[]},"reviews":{"nodes":[]},"commits":{"nodes":[]},
+   "reviewThreads":{"nodes":[{"isResolved":false,"comments":{"nodes":[{"author":{"login":"alice"}}]}}]}},
+  {}
+]}}}}
+JSON
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  # many-comments: seven new comments from other people since the last look.
+  if [ "$FAKE_GH_MODE" = "many-comments" ]; then
+    cat <<'JSON'
+{"data":{"search":{"nodes":[{"number":8,"title":"Mine","headRefName":"mine","author":{"login":"octo"},
+ "comments":{"nodes":[
+  {"id":"d1","author":{"login":"alice","__typename":"User"},"body":"one","url":"https://example.com/d1","createdAt":"2026-09-02T10:00:00Z"},
+  {"id":"d2","author":{"login":"alice","__typename":"User"},"body":"two","url":"https://example.com/d2","createdAt":"2026-09-02T10:01:00Z"},
+  {"id":"d3","author":{"login":"alice","__typename":"User"},"body":"three","url":"https://example.com/d3","createdAt":"2026-09-02T10:02:00Z"},
+  {"id":"d4","author":{"login":"alice","__typename":"User"},"body":"four","url":"https://example.com/d4","createdAt":"2026-09-02T10:03:00Z"},
+  {"id":"d5","author":{"login":"alice","__typename":"User"},"body":"five","url":"https://example.com/d5","createdAt":"2026-09-02T10:04:00Z"},
+  {"id":"d6","author":{"login":"alice","__typename":"User"},"body":"six","url":"https://example.com/d6","createdAt":"2026-09-02T10:05:00Z"},
+  {"id":"d7","author":{"login":"alice","__typename":"User"},"body":"seven","url":"https://example.com/d7","createdAt":"2026-09-02T10:06:00Z"}]},
+ "reviews":{"nodes":[]},"reviewThreads":{"nodes":[]}}]}}}
+JSON
+    exit 0
+  fi
+  cat <<'JSON'
+{"data":{"search":{"nodes":[
+  {"number":8,"title":"Mine","headRefName":"mine","author":{"login":"octo"},
+   "comments":{"nodes":[{"id":"c1","author":{"login":"alice","__typename":"User"},"body":"looks wrong","url":"https://example.com/c1","createdAt":"2026-09-01T10:00:00Z"},
+                        {"id":"c2","author":{"login":"octo","__typename":"User"},"body":"my own reply","url":"https://example.com/c2","createdAt":"2026-09-01T11:00:00Z"},
+                        {"id":"c3","author":{"login":"ci","__typename":"Bot"},"body":"tests passed","url":"https://example.com/c3","createdAt":"2026-09-01T12:00:00Z"},
+                        {"id":"c4","author":{"login":"alice","__typename":"User"},"body":"   ","url":"https://example.com/c4","createdAt":"2026-09-01T12:30:00Z"}]},
+   "reviews":{"nodes":[{"id":"r1","author":{"login":"bob","__typename":"User"},"body":"needs work","url":"https://example.com/r1","createdAt":"2026-09-01T09:00:00Z"}]},
+   "reviewThreads":{"nodes":[{"comments":{"nodes":[{"id":"t1","author":{"login":"bob","__typename":"User"},"body":"rename this","url":"https://example.com/t1","createdAt":"2026-09-01T13:00:00Z","path":"src/w.py"}]}}]}},
+  {}
+]}}}
+JSON
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2; exit 2

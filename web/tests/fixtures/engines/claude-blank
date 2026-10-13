@@ -1,0 +1,9 @@
+#!/bin/bash
+# Fake claude with blank lines, a tool that fails with no output, and no cost in the result.
+echo '{"type":"system","subtype":"init","session_id":"blank"}'
+echo ''
+echo '   '
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"false"}}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"second result for the same tool"}]}}'
+echo '{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}'

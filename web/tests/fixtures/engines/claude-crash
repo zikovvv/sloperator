@@ -1,0 +1,12 @@
+#!/bin/bash
+# Fake claude that emits a huge tool output, an orphan tool result, junk, then dies with stderr.
+prompt="${@: -1}"
+echo '{"type":"system","subtype":"init","session_id":"crash"}'
+big=$(head -c 41000 /dev/zero | tr '\0' 'x')
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"yes"}}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"'"$big"'"}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"never-started","content":"orphan"}]}}'
+echo 'this is not json'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}'
+echo "something went badly wrong" >&2
+exit 2

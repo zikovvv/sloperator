@@ -1,0 +1,87 @@
+{
+  "name": "orchestrator-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,ui -c cyan,magenta \"npm:dev:server\" \"npm:dev:ui\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:ui": "vite",
+    "build": "npm run build:ui && npm run build:server",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "test": "vitest run",
+    "build:ui": "vite build",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=cjs --outfile=electron/server.cjs --external:electron --external:node-pty",
+    "app": "concurrently -k -n server,ui,app -c cyan,magenta,green \"npm:dev:server\" \"npm:dev:ui\" \"wait-on tcp:5273 && electron .\"",
+    "dist": "npm run build && electron-builder --mac --dir",
+    "ship": "bash scripts/ship.sh",
+    "install-app": "npm run build && electron-builder --mac dmg:- --dir && rm -rf /Applications/Sloperator.app && cp -R release/mac-arm64/Sloperator.app /Applications/",
+    "postinstall": "node scripts/fix-pty-helper.cjs",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "rm -rf .nyc_output && UI_COVERAGE=1 playwright test",
+    "test:all": "npm run test:unit && npm run test:ui && nyc report",
+    "test:unit": "rm -rf coverage/unit && vitest run --coverage",
+    "test:report": "nyc report"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.6.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "express": "^4.21.2",
+    "monaco-editor": "^0.52.2",
+    "node-pty": "^1.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-istanbul": "^2.1.9",
+    "@vitest/coverage-v8": "^2.1.9",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2",
+    "jsdom": "^29.1.1",
+    "nyc": "^18.0.0",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vite-plugin-istanbul": "^9.0.1",
+    "vitest": "^2.1.8",
+    "wait-on": "^8.0.1"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "local.claude.orchestrator",
+    "productName": "Sloperator",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dir"
+      ],
+      "icon": "electron/icon.icns"
+    }
+  },
+  "version": "0.1.0",
+  "description": "Local orchestrator for claude and codex coding agents",
+  "author": "local"
+}

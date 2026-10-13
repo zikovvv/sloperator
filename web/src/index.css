@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* One scale for everything, so nothing looks hand-placed. */
+@layer base {
+  /* Defaults so the first paint is never unstyled; settings overwrite these on the root element. */
+  :root {
+    color-scheme: dark;
+    --ink-950: 20 17 14; --ink-900: 27 23 20; --ink-850: 34 29 25; --ink-800: 42 36 31;
+    --ink-700: 54 46 40; --ink-600: 69 59 51; --ink-500: 93 81 71; --ink-400: 133 120 104;
+    --ink-300: 176 164 149; --ink-200: 216 206 194; --ink-100: 240 234 225;
+    --accent: 217 140 74;
+    --ui-font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    --ui-font-size: 13px;
+  }
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-ink-950 text-ink-100 antialiased;
+    font-family: var(--ui-font);
+    font-size: var(--ui-font-size);
+  }
+  /* Never trap keyboard users: a visible ring on anything focused by key. */
+  :focus-visible { @apply outline-none ring-2 ring-accent/70 ring-offset-1 ring-offset-ink-950; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { @apply rounded-full bg-ink-600/60; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-ink-500; }
+  ::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-md bg-ink-800/80 px-2 py-1 text-[11px]
+           font-medium text-ink-200 ring-1 ring-inset ring-white/5;
+  }
+  .chip-button {
+    @apply chip transition-colors hover:bg-ink-700 hover:text-ink-100
+           active:scale-[0.97] active:bg-ink-600;
+  }
+  .icon-button {
+    @apply grid h-6 w-6 place-items-center rounded-md text-ink-400 transition-colors
+           hover:bg-white/10 hover:text-ink-100 active:scale-90 active:bg-white/15;
+  }
+  /* Every panel's collapse control: one size, one look, one place. */
+  .panel-toggle {
+    @apply grid h-5 w-5 shrink-0 place-items-center rounded-md text-[11px] leading-none text-ink-400
+           transition-colors hover:bg-white/10 hover:text-ink-100 active:scale-90 active:bg-white/15;
+  }
+  .row {
+    @apply flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors;
+  }
+  .row-idle { @apply hover:bg-white/[0.06]; }
+  .row-active { @apply bg-accent/20 text-white ring-1 ring-inset ring-accent/40; }
+  .row-open { @apply bg-white/[0.04] text-white; }
+  .panel { @apply rounded-lg border border-ink-800 bg-ink-900; }
+  .field {
+    @apply w-full rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-ink-100
+           placeholder:text-ink-400 focus:border-accent focus:outline-none;
+  }
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] font-medium
+           transition-colors active:scale-[0.98];
+  }
+  .btn-primary { @apply btn bg-accent text-white hover:bg-accent-strong; }
+  .btn-quiet { @apply btn bg-ink-800 text-ink-200 hover:bg-ink-700; }
+  .btn-danger { @apply btn bg-bad/90 text-white hover:bg-bad; }
+  .label { @apply text-[10px] font-semibold uppercase tracking-wider text-ink-400; }
+}
+
+/* The dot that says an agent is working. */
+@keyframes pulse-dot { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
+.dot-running { animation: pulse-dot 1.4s ease-in-out infinite; }
+
+/* A folded step that is still running: the status line breathes instead of blinking. */
+@keyframes shimmer-text { 0%,100% { opacity: 0.55 } 50% { opacity: 1 } }
+.shimmer { animation: shimmer-text 1.6s ease-in-out infinite; }
+
+/* The header is the window's title bar in the packaged app: drag it to move the window, double-click
+   it to fill the screen (macOS zoom, not the full-screen space). Its controls stay clickable. */
+.titlebar { -webkit-app-region: drag; }
+.titlebar button, .titlebar [role='tab'] { -webkit-app-region: no-drag; }
+
+/* The review editor's gutter ends in a hairline, so line numbers and +/- signs never read as code. */
+.review-code .monaco-editor .margin { box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.12); }

@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake claude that opens a tool call and then stalls: the Tasks view must show it in flight.
+echo '{"type":"system","subtype":"init","session_id":"stall"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t9","name":"Task","input":{"description":"sub agent"}}]}}'
+sleep 30
