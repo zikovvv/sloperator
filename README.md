@@ -1,7 +1,33 @@
 # Sloperator
 
-Native macOS app for orchestrating local `claude` (Claude Code) and `codex` CLI agents —
-Conductor/Codex-app style, in one place, local-only.
+A Mac app for running local `claude` (Claude Code) and `codex` agents side by side: many
+sessions across many git worktrees, each with its chat, its live activity and a review panel for
+what it changed. Everything runs on your machine with the CLIs you already have signed in; the
+app has no account and no server of its own.
+
+It is a personal tool, shared as it is: macOS only, built for one person's way of working, and
+it changes often.
+
+## Run it
+
+You need Node 22 or newer, git, and at least one of the `claude` and `codex` CLIs signed in.
+
+```bash
+cd web
+npm install
+npm run dev        # the app in your browser: http://localhost:5273
+```
+
+To install it as a Mac app instead (`/Applications/Sloperator.app`, ad-hoc signed):
+
+```bash
+cd web
+npm run ship
+```
+
+Optional, each used only if present: `gh` (pull requests and stacks), `pyright-langserver` and
+`typescript-language-server` (go to definition and usages in the review panel), `whisper-cpp`
+with a model in `~/.cache/whisper/` (dictation).
 
 ## Hierarchy
 
@@ -38,8 +64,14 @@ Project  (git repo; git init happens automatically when you add a non-git folder
   removing from the sidebar and archiving all leave the folder untouched. The only way one is
   destroyed is the red **Delete Worktree** button on its page, which confirms first and never
   deletes the branch.
-- **Review panel** (right side): changed files vs the worktree's base branch, unified diff, and a
-  Source tab with **pyright/tsserver LSP navigation** — ⌘-click go-to-definition, hover for types.
+- **Review panel** (right side): the whole file with its changes inline, against the worktree's
+  base, the default branch, a commit, or just the last turn; comments and quotes go straight into
+  the chat; **pyright/tsserver navigation** - ⌘-click or F12 for definitions, ⇧F12 for usages.
+- **Stacks**: a stack of worktrees where each layer builds on the one below; update them bottom
+  to top, open their pull requests chained, land the bottom one.
+- **Live activity**: every tool call, process and subagent of a running turn, with kill switches.
+  A turn stays open while commands or subagents it started in the background are still running,
+  and they are listed while they do.
 - **Claude Infra tab**: browse/edit global + project CLAUDE.md, memories, hooks, skills, agents,
   commands without digging through dotfiles.
 - **Usage tab**: a Claude | Codex switch; each side shows the plan's limits (session and weekly,
@@ -61,22 +93,28 @@ Project  (git repo; git init happens automatically when you add a non-git folder
 - **Pull Requests tab**: `gh pr list` per project, CI status, one-click "review in new worktree".
 - **Slash-skill autocomplete** in the composer + quick-start skill/agent buttons on empty chats.
 
-## Build & run
+## Tests
 
 ```bash
-./scripts/build_app.sh --open     # builds dist/Orchestrator.app and launches it
+cd web
+npm run test:all   # vitest (every file at 100% coverage), then Playwright in headless Chromium
 ```
 
-Dev loop: `swift run` (runs unbundled, still shows the full UI).
+Tests run against throwaway state, fake `claude`/`codex`/`gh` binaries and their own ports;
+they never touch your real sessions. `CLAUDE.md` holds the rules changes are held to.
 
-## Requirements
+## Layout
 
-- `claude` and `codex` CLIs on PATH (also searched: `~/.local/bin`, `/opt/homebrew/bin`,
-  `~/miniconda3/bin`).
-- `pyright-langserver` for Python navigation, `typescript-language-server` for TS/JS (optional).
-- `gh` for the Pull Requests tab (optional).
+- `web/server` - the Node server: turns, worktrees, git, review, usage, the tools agents get.
+- `web/src` - the React interface. `web/electron` - the Mac app shell.
+- `Sources/`, `Tests/`, `Package.swift`, `scripts/build_app.sh` - the first, native Swift
+  version of the app. It is kept for reference and no longer developed.
 
 ## State
 
 `~/Library/Application Support/ClaudeOrchestrator/` — `state.json` (projects, worktrees, sessions,
 settings) + `transcripts/<session>.json`. Delete a file there to reset that piece.
+
+## Licence
+
+MIT, see `LICENSE`.

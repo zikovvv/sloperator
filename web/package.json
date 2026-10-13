@@ -1,6 +1,7 @@
 {
   "name": "orchestrator-web",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n server,ui -c cyan,magenta \"npm:dev:server\" \"npm:dev:ui\"",
